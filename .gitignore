@@ -1,0 +1,61 @@
+# ===============================
+# Python
+# ===============================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.env
+.venv
+venv/
+ENV/
+env/
+
+# ===============================
+# Project data (do not track)
+# ===============================
+
+/tsmod/state_space/linear/data/
+
+# ===============================
+# Packaging / Build artifacts
+# ===============================
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# ===============================
+# Testing / coverage
+# ===============================
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# ===============================
+# IDEs / Editors
+# ===============================
+.idea/
+.vscode/
+
+# ===============================
+# OS files
+# ===============================
+.DS_Store
+Thumbs.db
+
+# ===============================
+# Logs
+# ===============================
+*.log
+
+# ===============================
+# Secrets (if any)
+# ===============================
+.env.local
+.env.*.local
