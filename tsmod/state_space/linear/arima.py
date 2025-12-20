@@ -55,11 +55,11 @@ class ARIMA(LinearStateProcess):
         return self
 
     @property
-    def is_defined(self):
+    def is_dynamics_defined(self):
         return (self.ar_coeffs is not None) and (self.ma_coeffs is not None)
 
     @property
-    def _n_params(self) -> int:
+    def n_dynamic_params(self) -> int:
         return self.order[0] + self.order[2]
 
     @property
@@ -214,13 +214,13 @@ class ARIMA(LinearStateProcess):
         else:
             self._ma_coeffs = values
 
-    def _get_params(self) -> np.ndarray:
+    def _get_dynamic_params(self) -> np.ndarray:
         params = np.empty((self.n_params,))
         params[:self.order[0]] = self._get_ar_params()
         params[self.order[0]:] = self._get_ma_params()
         return params
 
-    def _update_params(self, params: np.ndarray) -> None:
+    def _update_dynamic_params(self, params: np.ndarray) -> None:
         self._update_ar_params(params[:self.order[0]])
         self._update_ma_params(params[self.order[0]:])
 

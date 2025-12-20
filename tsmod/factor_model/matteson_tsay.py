@@ -5,7 +5,7 @@ from scipy.stats import chi2
 
 from numba import njit
 
-from constrained_matrices import SpecialOrthogonalConstraint, SkewSymmetricConstraint
+from constrained_matrices import SpecialOrthogonalMatrix, SkewSymmetricMatrix
 
 
 def calc_lagged_inner_product(x: np.ndarray, m: int) -> np.ndarray:
@@ -43,7 +43,7 @@ class MattesonAndTsay:
         Ss = calc_lagged_inner_product(demeaned_factors, max_lag)
 
         # rotation_matrix_wrapper = SpecialOrthogonalConstraint((n_factors, n_factors))
-        skew_symmetric = SkewSymmetricConstraint((n_factors, n_factors))
+        skew_symmetric = SkewSymmetricMatrix((n_factors, n_factors))
 
         dof = skew_symmetric.n_params
 
@@ -121,7 +121,7 @@ if __name__ == '__main__':
     for i in range(n_factors):
         factors[:, i] = generate_ar1(np.random.rand() * 0.5 + 0.4, T)
 
-    rotation_wrapper = SpecialOrthogonalConstraint((n_factors, n_factors))
+    rotation_wrapper = SpecialOrthogonalMatrix((n_factors, n_factors))
     random_params = 10 * np.random.rand(rotation_wrapper.n_params)
     rotation_wrapper.update_params(random_params)
 

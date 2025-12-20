@@ -59,24 +59,24 @@ class ApproximateFI(LinearStateProcess):
         return self._approximator
 
     @property
-    def is_defined(self):
+    def is_dynamics_defined(self):
         return (self._d is not None) and (self._T is not None)
 
     @property
-    def _n_params(self) -> int:
+    def n_dynamic_params(self) -> int:
         return 1
 
     @property
     def state_dim(self) -> int:
         return self._underlying_arima.state_dim
 
-    def _update_params(self, params: np.ndarray) -> None:
+    def _update_dynamic_params(self, params: np.ndarray) -> None:
         if len(params) > 1:
             raise ValueError("params must have exactly 1 element")
         a, b = self._d_limits
         self.d = a + 0.5 * (np.tanh(params[0]) + 1) * (b - a)
 
-    def _get_params(self) -> np.ndarray:
+    def _get_dynamic_params(self) -> np.ndarray:
         a, b = self._d_limits
         params = np.array([np.atanh(2 * (self.d - a) / (b - a) - 1)])
         return params

@@ -504,8 +504,41 @@ class Signal(ABC):
     def shape(self):
         return self._shape
 
+    def check_or_infer_shape(self, proposed_shape: tuple[int | None, int | None]):
+        """
+        Check the proposed shape against current shape, and infer missing dimensions if possible.
+
+        Parameters
+        ----------
+        proposed_shape : tuple[int | None, int | None]
+            The shape to check/infer.
+
+        Returns
+        -------
+        tuple[int, int]
+            Fully specified shape after inference.
+
+        Raises
+        ------
+        ValueError
+            If the proposed shape conflicts with current shape or cannot be inferred.
+        """
+        if not isinstance(proposed_shape, tuple) or len(proposed_shape) != 2:
+            raise TypeError("proposed_shape must be a tuple of length 2")
+
+        result = []
+        for current, new in zip(self.shape, proposed_shape):
+            if current is not None and new is not None:
+                if current != new:
+                    raise ValueError(f"Conflicting values: {current} vs {new}")
+                result.append(current)
+            else:
+                result.append(current if current is not None else new)
+
+        return tuple(result)
+
     @shape.setter
-    def shape(self, value):
+    def shape(self, value: tuple[int | None, int | None]):
         if not isinstance(value, tuple):
             raise TypeError(f"shape must be a tuple, got {type(value)}")
         if len(value) != 2:
@@ -513,16 +546,9 @@ class Signal(ABC):
         if not all(isinstance(x, (int, type(None))) for x in value):
             raise TypeError("Each element of shape must be an int or None")
 
-        result = []
-        for x, y in zip(self.shape, value):
-            if x is not None and y is not None:
-                if x != y:
-                    raise ValueError(f"Conflicting values: {x} vs {y}")
-                result.append(x)
-            else:
-                result.append(x if x is not None else y)
+        shape = self.check_or_infer_shape(value)
 
-        self._shape = tuple(result)
+        self._shape = shape
 
     @property
     def has_shape(self):
@@ -535,6 +561,10 @@ class Signal(ABC):
     @property
     def n_params(self):
         return 0 if self.is_frozen else self._n_params
+
+    @property
+    def n_tot_params(self):
+        return self._n_params
 
     @property
     @abstractmethod
@@ -603,15 +633,6 @@ class CompositeSignal(Signal, ABC):
     def unfreeze(self):
         for signal in self._underlying_signals:
             signal.unfreeze()
-
-    # def _get_is_frozen(self):
-    #     return len(self._underlying_unfrozen_signals) == 0
-    #
-    # def _set_is_frozen(self, value):
-    #     for comp in self._underlying_signals:
-    #         comp.is_frozen = value
-
-
 
     @property
     @abstractmethod

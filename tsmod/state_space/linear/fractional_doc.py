@@ -2,7 +2,7 @@ import numpy as np
 
 # from base import ModelFit, Signal
 from linear_ssm import CompositeLinearStateProcess
-from constrained_matrices import UnConstrained as FreeMatrix
+from constrained_matrices import FreeMatrix as FreeMatrix
 
 from approximate_fi import ApproximateFI
 from arfima_utils import estimate_fractional_d_ewl

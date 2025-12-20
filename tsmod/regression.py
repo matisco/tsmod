@@ -9,7 +9,7 @@ import numpy as np
 from sympy.core.cache import cached_property
 
 from base import ModelFit, Model, DeterministicForecastResult, ForecastResult
-from constrained_matrices import ConstrainedMatrix, UnConstrained
+from constrained_matrices import ConstrainedMatrix, FreeMatrix
 from optimization_objectives import OptimizationObjective
 
 
@@ -24,7 +24,7 @@ class Regression(Model):
         self._exog = exog
         self._exog_loadings = exog_loadings
 
-        if not isinstance(self._exog_loadings, UnConstrained):
+        if not isinstance(self._exog_loadings, FreeMatrix):
             raise NotImplementedError("Regression currently only support unconstrained loadings")
 
         self._exog_loadings.shape = (None, self._exog.shape[1])
@@ -157,7 +157,7 @@ if "__main__" == __name__:
         factors[:, i] = generate_ar1(np.random.rand() * 0.5 + 0.4, T)
 
 
-    loadings = UnConstrained((N, n_factors))
+    loadings = FreeMatrix((N, n_factors))
     params = np.random.rand(loadings.n_params)
     loadings.update_params(params)
 
@@ -165,7 +165,7 @@ if "__main__" == __name__:
 
     endog = factors @ loadings.matrix.T + noise_scale * np.random.randn(T, N)
 
-    model = Regression(factors, UnConstrained((None, None)))
+    model = Regression(factors, FreeMatrix((None, None)))
     res = model.fit(endog)
 
     print(res)

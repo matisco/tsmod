@@ -12,12 +12,13 @@ from optimization_objectives import OptimizationObjective, GaussianNLL
 # from deterministic import DeterministicProcess, DeterministicModel
 from constrained_matrices import (ConstrainedMatrix,
                                   UnitTopRowConstrained as UnitTopRowMatrix,
-                                  UnConstrained as FreeMatrix,
-                                  PosDiagonalConstraint as PosDiagonalMatrix,
-                                  IdentityConstraint as IdentityMatrix,
-                                  DiagonalConstraint as DiagonalMatrix,
-                                  ZeroConstraint as ZeroMatrix,
-                                  PosDiagLowerTriangularConstraint as STDMatrix)
+                                  FreeMatrix as FreeMatrix,
+                                  PosDiagonalMatrix as PosDiagonalMatrix,
+                                  IdentityMatrix as IdentityMatrix,
+                                  DiagonalMatrix as DiagonalMatrix,
+                                  ZeroMatrix as ZeroMatrix,
+                                  PosDiagLowerTriMatrix as STDMatrix,
+                                  CorrelationConstraint as CorrMatrix)
 
 
 from tsmod.base import Signal, Model, ModelFit, CompositeSignal, CompositeModel, check_is_defined
@@ -74,6 +75,26 @@ from utils import numerical_jacobian
 # ---------
 
 class LinearSSMUtils:
+
+    @staticmethod
+    def validate_covariance(Q):
+        """Check that Q is a valid covariance matrix."""
+        if Q.shape[0] != Q.shape[1]:
+            raise ValueError("Covariance matrix Q must be square")
+        if not np.allclose(Q, Q.T):
+            raise ValueError("Covariance matrix Q must be symmetric")
+        # Check positive semi-definite
+        eigenvalues = np.linalg.eigvalsh(Q)
+        if np.any(eigenvalues < -1e-12):  # allow tiny numerical errors
+            raise ValueError("Covariance matrix Q must be positive semi-definite")
+
+    @staticmethod
+    def validate_chol_factor(LQ):
+        """Check that LQ is lower triangular with positive diagonal."""
+        if not np.allclose(LQ, np.tril(LQ)):
+            raise ValueError("LQ must be lower triangular")
+        if np.any(np.diag(LQ) <= 0):
+            raise ValueError("Diagonal entries of LQ must be positive")
 
     @staticmethod
     def simulate_or_forecast(time_domain: Union[tuple[int, int], int],
@@ -178,10 +199,32 @@ class LinearStateSpaceModelFit(ModelFit):
 
 class LinearStateProcessRepresentation:
 
-    def __init__(self, M, F, R):
+    def __init__(self,M, F, R,
+                 LQ: Optional[np.ndarray] = None, Q: Optional[np.ndarray] = None,
+                 validate: bool = True):
+
         self._M = M
         self._F = F
         self._R = R
+
+        if validate:
+            for m in [M, F, R]:
+                if not isinstance(m, np.ndarray):
+                    raise ValueError("M, F, R need to be a numpy arrays")
+            if LQ is not None:
+                LinearSSMUtils.validate_chol_factor(LQ)
+            if Q is not None:
+                LinearSSMUtils.validate_covariance(Q)
+
+            if (LQ is not None) and (Q is not None):
+                if not np.allclose(LQ @ LQ.T, Q):
+                    raise ValueError("LQ needs to be the Cholesky factor of Q")
+
+        self._Q = Q
+        self._LQ = LQ
+        if LQ is None and Q is None:
+            self._LQ = np.eye(R.shape[1])
+            self._Q = self._LQ
 
     @property
     def M(self):
@@ -196,18 +239,62 @@ class LinearStateProcessRepresentation:
         return self._R
 
     @property
+    def Q(self):
+        if self._Q is None:
+            self._Q = self._LQ @ self._LQ.T
+        return self._Q
+
+    @property
+    def LQ(self):
+        if self._LQ is None:
+            self._LQ = np.linalg.cholesky(self._Q)
+        return self._LQ
+
+    @property
+    def RQRT(self):
+        return self.R @ self.Q @ self.R.T
+
+    @property
     def params(self):
         return self.M, self.F, self.R
 
 
 class LinearStateSpaceModelRepresentation(LinearStateProcessRepresentation):
 
-    def __init__(self, const, E, L, M, F, R):
-        super().__init__(M, F, R)
+    def __init__(self,
+                 E,
+                 M, F, R,
+                 const: Optional[np.ndarray] = None,
+                 LH: Optional[np.ndarray] = None, H: Optional[np.ndarray] = None,
+                 LQ: Optional[np.ndarray] = None, Q: Optional[np.ndarray] = None,
+                 validate: bool = True):
+
+        if LH is None and H is None:
+            raise ValueError("At least one of LH or H must be provided")
+
+        super().__init__(M, F, R, LQ, Q, validate)
+
+        if const is None:
+            const = np.zeros((E.shape[0],))
+
+        if validate:
+            for m in [const, E]:
+                if not isinstance(m, np.ndarray):
+                    raise ValueError("const, E need to be a numpy arrays")
+            if LH is not None:
+                LinearSSMUtils.validate_chol_factor(LH)
+            if H is not None:
+                LinearSSMUtils.validate_covariance(H)
+
+            if (LH is not None) and (H is not None):
+                if not np.allclose(LH @ LH.T, H):
+                    raise ValueError("LQ needs to be the Cholesky factor of Q")
+
+
         self._const = const
         self._E = E
-        self._L = L
-        self._cont = const
+        self._LH = LH
+        self._H = H
 
     @property
     def const(self):
@@ -218,8 +305,16 @@ class LinearStateSpaceModelRepresentation(LinearStateProcessRepresentation):
         return self._E
 
     @property
-    def L(self):
-        return self._L
+    def H(self):
+        if self._H is None:
+            self._H = self._LH @ self._LH.T
+        return self._H
+
+    @property
+    def LH(self):
+        if self._LH is None:
+            self._LH = np.linalg.cholesky(self._H)
+        return self._LH
 
     @property
     def params(self):
@@ -231,8 +326,86 @@ class LinearStateSpaceModelRepresentation(LinearStateProcessRepresentation):
 
 class LinearStateProcess(Model, ABC):
 
-    def __init__(self, shape: tuple, **kwargs):
+    # _scale_constrain_to_underlying_map = {'free': STDMatrix,
+    #                                       'identity': IdentityMatrix,
+    #                                       'diagonal': PosDiagonalMatrix,
+    #                                       'correlation': CorrMatrix}
+
+    _scale_constrain_options = ["free", "identity", "diagonal", "correlation"]
+
+    def __init__(self, shape: tuple, innovation_dim: int, **kwargs):
         super().__init__(shape, **kwargs)
+
+        self._innovation_dim = innovation_dim
+        self._scale_constrain = 'free'
+        self._underlying_scale_matrix = STDMatrix((self._innovation_dim, self._innovation_dim))
+
+    @property
+    def innovation_dim(self) -> int:
+        """Return the dimension of the model innovations."""
+        return self._innovation_dim
+
+    @property
+    def scale_constrain(self):
+        return self._scale_constrain
+
+    @scale_constrain.setter
+    def scale_constrain(self, value):
+        if value not in self._scale_constrain_options:
+            raise ValueError("Scale constraint must be one of: free, identity, diagonal, correlation")
+
+        getattr(self, f'_constrain_scale_to_{value}')(self._scale_constrain)
+        self._scale_constrain = value
+
+    def set_scale_constrain(self, value):
+        self.scale_constrain = value
+        return self
+
+    @property
+    def std(self):
+        if not self._underlying_scale_matrix.is_defined:
+            return None
+
+        if self._scale_constrain == 'free':
+            return self._underlying_scale_matrix.matrix
+        elif self._scale_constrain == 'identity':
+            return self._underlying_scale_matrix.matrix
+        elif self._scale_constrain == 'diagonal':
+            return self._underlying_scale_matrix.matrix
+        elif self._scale_constrain == 'correlation':
+            return self._underlying_scale_matrix.matrix
+        else:
+            raise ValueError("Scale constraint must be one of: free, identity, diagonal, correlation")
+
+    @property
+    def cov(self):
+        if not self._underlying_scale_matrix.is_defined:
+            return None
+
+        if self._scale_constrain == 'free':
+            mat = self._underlying_scale_matrix.matrix
+            return mat @ mat.T
+        elif self._scale_constrain == 'identity':
+            return self._underlying_scale_matrix.matrix
+        elif self._scale_constrain == 'diagonal':
+            return self._underlying_scale_matrix.matrix ** 2
+        elif self._scale_constrain == 'correlation':
+            return self._underlying_scale_matrix.matrix
+        else:
+            raise ValueError("Scale constraint must be one of: free, identity, diagonal, correlation")
+
+    def _constrain_scale_to_identity(self, previous_scale_constraint):
+        self._underlying_scale_matrix = IdentityMatrix((self._innovation_dim, self._innovation_dim))
+
+    def _constrain_scale_to_diagonal(self, previous_scale_constraint):
+        current_std = self.std
+        self._underlying_scale_matrix = PosDiagonalMatrix((self._innovation_dim, self._innovation_dim))
+
+    def _constrain_scale_to_correlation(self):
+        self._underlying_scale_matrix = CorrMatrix((self._innovation_dim, self._innovation_dim))
+
+    def _constrain_scale_to_free(self):
+        self._underlying_scale_matrix = STDMatrix((self._innovation_dim, self._innovation_dim))
 
     @property
     @abstractmethod
@@ -240,44 +413,50 @@ class LinearStateProcess(Model, ABC):
         raise NotImplementedError
 
     @property
-    @abstractmethod
     def is_defined(self) -> bool:
+        return self._underlying_scale_matrix.is_defined and self.is_dynamics_defined
+
+    @property
+    @abstractmethod
+    def is_dynamics_defined(self) -> bool:
         raise NotImplementedError
 
     @abstractmethod
     def _update_params(self, params: np.ndarray) -> None:
-        raise NotImplementedError
+        self._scale.update_params(params[:self._scale.n_params])
+        self._update_params(params[self._scale.n_params:])
 
     @abstractmethod
     def _get_params(self) -> np.ndarray:
+        params = np.empty((self.n_params,))
+        params[:self._scale.n_params] = self._scale.get_params()
+        params[self._scale.n_params:] = self._get_dynamic_params()
+        return params
+
+    @property
+    def _n_params(self) -> int:
+        return self.n_dynamic_params + self._scale.n_params
+
+    @property
+    @abstractmethod
+    def n_dynamic_params(self) -> int:
         raise NotImplementedError
 
-    def _state_space_model(self,
-                           include_constant: bool,
-                           measurement_noise: Optional[Literal["zero", "diagonal", "full"]]) -> "LinearStateSpaceModel":
+    @abstractmethod
+    def _get_dynamic_params(self) -> np.ndarray:
+        """
+        Return only the concrete subclass parameters as a 1D array.
+        Do NOT include scale parameters; the base class will handle those.
+        """
+        raise NotImplementedError
 
-        exposures = DiagonalMatrix((self.shape[0], self.shape[0]))
-
-        if include_constant:
-            constant = FreeMatrix((None, 1))
-        else:
-            constant = ZeroMatrix((None, 1))
-
-        if measurement_noise == "zero" or measurement_noise is None:
-            measurement_noise = ZeroMatrix((None, None))
-        elif measurement_noise == "diagonal":
-            measurement_noise = PosDiagonalMatrix((None, None))
-        elif measurement_noise == "full":
-            measurement_noise = STDMatrix((None, None))
-        else:
-            raise ValueError("Unknown measurement noise")
-
-        ssm = LinearStateSpaceModel(linear_state_process=self,
-                                    exposures=exposures,
-                                    constant=constant,
-                                    measurement_noise_std=measurement_noise)
-
-        return ssm
+    @abstractmethod
+    def _update_dynamic_params(self, params: np.ndarray):
+        """
+        Set only the concrete subclass parameters from a 1D array.
+        Do NOT include scale parameters; the base class will handle those.
+        """
+        raise NotImplementedError
 
     @check_is_defined
     def forecast(self, k: int, initial_state: np.ndarray) -> np.ndarray:
@@ -326,10 +505,93 @@ class LinearStateProcess(Model, ABC):
 
     @abstractmethod
     def _first_fit_to(self, series: np.ndarray):
+        """
+        fits the model to the series. the series should match the shape of the process.
+
+        for instance, if the process is shape (n, 1), then series should be of size T * n
+
+        Args:
+            series: observed time series
+
+        """
         raise NotImplementedError
+
+    def _build_state_space_model(self,
+                                 series,
+                                 include_constant: bool,
+                                 measurement_noise: Optional[Literal["zero", "diagonal", "full"]]) -> "LinearStateSpaceModel":
+        """
+        Can be overwritten.
+
+        needs to build a state space model of the form
+
+        y_t = E f_t + e_t, e_t ~ N(0,H) = LH N(0, I)
+        f_t = M x_t
+        x_t = F x_t-1 + R u_t , u_t ~ N(0,Q) = LQ N(0, I)
+
+        see LinearStateSpaceModelRepresentation
+
+        Args:
+            series:
+            include_constant:
+            measurement_noise:
+
+        Returns:
+
+        """
+
+        if series.shape[0] == self.shape[0]:
+            if not self.is_defined:
+                was_identity_flag = False
+                if self._scale_constrain == 'identity':
+                    was_identity_flag = True
+                    self.constrain_scale_to_diagonal()
+
+                self._first_fit_to(series)
+
+                if was_identity_flag:
+                    exposures = DiagonalMatrix((self.shape[0], self.shape[0]))
+
+                else:
+                    exposures = IdentityMatrix((self.shape[0], self.shape[0]))
+
+
+
+        if include_constant:
+            constant = FreeMatrix((None, 1))
+        else:
+            constant = ZeroMatrix((None, 1))
+
+        if measurement_noise == "zero" or measurement_noise is None:
+            measurement_noise = ZeroMatrix((None, None))
+        elif measurement_noise == "diagonal":
+            measurement_noise = PosDiagonalMatrix((None, None))
+        elif measurement_noise == "full":
+            measurement_noise = STDMatrix((None, None))
+        else:
+            raise ValueError("Unknown measurement noise")
+
+        ssm = LinearStateSpaceModel(linear_state_process=self,
+                                    exposures=exposures,
+                                    constant=constant,
+                                    measurement_noise_std=measurement_noise)
+
+        return ssm
 
 
 class CompositeLinearStateProcess(CompositeModel, LinearStateProcess):
+
+    def _update_dynamic_params(self, params: np.ndarray):
+        pass
+
+
+    def _get_dynamic_params(self) -> np.ndarray:
+        pass
+
+    @property
+    def n_dynamic_params(self) -> int:
+        pass
+
 
     def __init__(self, processes: list[LinearStateProcess], mixing_matrix: np.ndarray):
         self._underlying_processes = processes

@@ -12,7 +12,7 @@ from base import ForecastResult, DeterministicForecastResult, Signal
 
 # from base import ModelFit, Model, BaseUtils, CompositeSignal
 from optimization_objectives import OptimizationObjective
-from constrained_matrices import ConstrainedMatrix, UnConstrained
+from constrained_matrices import ConstrainedMatrix, FreeMatrix
 
 
 #
