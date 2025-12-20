@@ -548,7 +548,13 @@ class Signal(ABC):
 
         shape = self.check_or_infer_shape(value)
 
+        self._on_shape_setter(shape)
+
         self._shape = shape
+
+    def _on_shape_setter(self, shape: tuple[int | None, int | None]):
+        """Hook for subclasses to override if needed."""
+        pass
 
     @property
     def has_shape(self):

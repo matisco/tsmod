@@ -17,7 +17,11 @@ from utils import (softplus,
                    indexing_row_to_column_major)
 
 
-# TODO: currently, when a square matrix is required, shape is not allowed to be (None, None) which should be possible
+# TODO:
+#  1. there are some inconsistencies with how _n_params is used and specifically how it interacts with has_shape
+#  2. currently whenever parameters are updated calculations which may be expensive are performed.
+#           It could be done lazily, doubt it makes a difference.
+#           If parameters are updated, one would think the matrix will be called
 
 # -----------
 # Abstract classes. Base, composite and with underlying
@@ -108,17 +112,29 @@ class ConstrainedMatrix(Signal, ABC):
 
     @matrix.setter
     def matrix(self, matrix):
+        self._matrix_setter(matrix, run_check=True)
+
+    def set_matrix(self, value):
+        self._matrix_setter(value, run_check=True)
+        return self
+
+    def set_matrix_trusted(self, value):
+        self._matrix_setter(value, run_check=False)
+        return self
+
+    def _matrix_setter(self, value, run_check: bool):
         if not self.has_shape:
-            shape = matrix.shape
+            shape = value.shape
             if self._enforce_square and (shape[0] != shape[1]):
                 raise ValueError("Shape of matrix must be square")
             self.shape = shape
 
-        if matrix.shape != self.shape:
-            raise ValueError(f"Matrix shape mismatch: {matrix.shape} != {self.shape}")
-        self._check_matrix_constrain(matrix)
-        self._on_matrix_setter(matrix)
-        self._matrix = matrix
+        if value.shape != self.shape:
+            raise ValueError(f"Matrix shape mismatch: {value.shape} != {self.shape}")
+        if run_check:
+            self._check_matrix_constrain(value)
+        self._on_matrix_setter(value)
+        self._matrix = value
 
     def _on_matrix_setter(self, matrix):
         """Hook for subclasses to override if needed."""
@@ -396,17 +412,24 @@ class ConstrainedMatrixWithUnderlying(ConstrainedMatrix, ABC):
     def __init__(self,
                  shape: tuple,
                  underlying: ConstrainedMatrix,
-                 store_both: bool):
+                 store_both: bool,
+                 run_check_on: Literal['top','underlying', 'both']):
+
         super().__init__(shape)
         self._underlying = underlying
         self._store_both = store_both
+        self._run_check_on = run_check_on
+
+    @abstractmethod
+    def _on_shape_setter(self, shape: tuple):
+        raise NotImplementedError
 
     @property
     def matrix(self):
         if self._store_both and self._matrix is not None:
             return self._matrix
 
-        matrix = self._compute_from_underlying()
+        matrix = self._compute_matrix_from_underlying()
 
         if self._store_both:
             self._matrix = matrix
@@ -417,27 +440,43 @@ class ConstrainedMatrixWithUnderlying(ConstrainedMatrix, ABC):
     def is_defined(self):
         return self._underlying.is_defined
 
-    @matrix.setter
-    def matrix(self, matrix):
+    def _matrix_setter(self, value, run_check: bool):
+        # 1. Set shape if unknown
         if not self.has_shape:
-            self.shape = matrix.shape
+            shape = value.shape
+            if self._enforce_square and (shape[0] != shape[1]):
+                raise ValueError("Shape of matrix must be square")
+            self.shape = shape
 
-        if matrix.shape != self.shape:
-            raise ValueError(f"Matrix shape mismatch: {matrix.shape} != {self.shape}")
-        
-        self._check_matrix_constrain(matrix)
-        self._on_matrix_setter(matrix)
-        
-        underlying_matrix = self._compute_underlying_from_matrix(matrix)
-        self._underlying.matrix = underlying_matrix
-        
+        # 2. Validate shape
+        if value.shape != self.shape:
+            raise ValueError(f"Matrix shape mismatch: {value.shape} != {self.shape}")
+
+        # 3. Check constraints on this matrix if needed
+        if run_check and (self._run_check_on in ('both', 'top')):
+            self._check_matrix_constrain(value)
+
+        # 4. Hook for subclasses
+        self._on_matrix_setter(value)
+
+        # 5. Optionally store the matrix
         if self._store_both:
-            self._matrix = matrix
+            self._matrix = value
+
+        # 6. Compute underlying
+        underlying_matrix = self._compute_underlying_from_matrix(value)
+
+        # 7. Update underlying with or without checks
+        if run_check and (self._run_check_on in ('both', 'underlying')):
+            self._underlying.set_matrix(underlying_matrix)
+        else:
+            self._underlying.set_matrix_trusted(underlying_matrix)
 
     @abstractmethod
     def _compute_matrix_from_underlying(self) -> np.ndarray:
         raise NotImplementedError
-    
+
+    @abstractmethod
     def _compute_underlying_from_matrix(self, matrix):
         raise NotImplementedError
 
@@ -612,13 +651,13 @@ class FullyDefinedConstructor(FullyDefinedMatrix):
     def _get_col_constraint(self, idx: int):
         n, m = self.shape
         A = np.eye(n)
-        b = self._matrix[:, idx].copy()
+        b = self._matrix[:, idx]
         return A, b.reshape(-1,1), None, None
 
     def _get_row_constraint(self, idx: int):
         n, m = self.shape
         A = np.eye(m)
-        b = self._matrix[idx+idx+1, :].copy()
+        b = self._matrix[idx+idx+1, :]
         return A, b, None, None
 
     def _check_matrix_constrain(self, matrix):
@@ -656,7 +695,9 @@ class UnitTopRowConstrained(ConstrainedMatrix):
         self.matrix[1:, :] = params.reshape((n-1, m), order='F')
 
     def _get_params(self) -> np.ndarray:
-        return self._matrix[1:, :].copy().reshape(-1, order='F')
+        # return self._matrix[1:, :].copy().reshape(-1, order='F')
+        slice_2d = self._matrix[1:, :]
+        return slice_2d.ravel(order='F')
 
     def _get_col_constraint(self, idx: int):
         n, m = self.shape
@@ -840,7 +881,7 @@ class LowerTriangularMatrix(ConstrainedMatrix):
     def _get_params(self) -> np.ndarray:
         n, m = self.shape
         idx = np.tril_indices(n, k=0, m=m)
-        return self.matrix[idx].copy()
+        return self.matrix[idx]
 
     def _update_params(self, params) -> None:
         if self.matrix is None:
@@ -932,7 +973,7 @@ class SetDiagLowerTriangularConstraint(ConstrainedMatrix):
     def _get_params(self) -> np.ndarray:
         n, m = self.shape
         idx = np.tril_indices(n, k=-1, m=m)
-        return self.matrix[idx].copy()
+        return self.matrix[idx]
 
     def _update_params(self, params) -> None:
         if self.matrix is None:
@@ -1039,10 +1080,10 @@ class PosDiagLowerTriMatrix(ConstrainedMatrix):
         n, m = self.shape
         # strictly lower-triangular indices
         lower_idx = np.tril_indices(n, k=-1, m=m)
-        lower_params = self.matrix[lower_idx].copy()
+        lower_params = self.matrix[lower_idx]
         # diagonal indices
         diag_idx = np.diag_indices(min(n, m))
-        diag_params = softplus_inv(self.matrix[diag_idx].copy())  # invert softplus to get free param
+        diag_params = softplus_inv(self.matrix[diag_idx])  # invert softplus to get free param
         # concatenate: lower-triangular first, then diagonal
         return np.concatenate([lower_params, diag_params])
 
@@ -1230,7 +1271,7 @@ class SymmetricMatrix(ConstrainedMatrix):
     def _get_params(self) -> np.ndarray:
         n, m = self.shape
         idx = np.tril_indices(n, k=0, m=m)
-        return self.matrix[idx].copy()
+        return self.matrix[idx]
 
     def _update_params(self, params) -> None:
         if self.matrix is None:
@@ -1318,17 +1359,16 @@ class SetDiagSymmetricConstraint(ConstrainedMatrix):
         if self.matrix is None:
             matrix = np.zeros(self.shape)
             matrix[np.diag_indices(min(*self.shape))] = self._diag_value
-            self.matrix = matrix
+            self.set_matrix_trusted(matrix)
         n, m = self.shape
         idx = np.tril_indices(n, k=-1, m=m)
         self._matrix[idx] = params
-        upper_idx = np.triu_indices(n, k=1, m=m)
-        self._matrix[upper_idx] = self._matrix.T[upper_idx]
+        self._matrix.T[idx] = params
 
     def _get_params(self) -> np.ndarray:
         n, m = self.shape
         idx = np.tril_indices(n, k=-1, m=m)
-        return self.matrix[idx].copy()
+        return self.matrix[idx]
 
     def jacobian_vec_params(self, order: Literal['F', 'C'] = 'C'):
         n, m = self.shape
@@ -1399,11 +1439,11 @@ class SkewSymmetricMatrix(ConstrainedMatrix):
     def _get_params(self) -> np.ndarray:
         n, m = self.shape
         idx = np.tril_indices(n, k=-1, m=m)
-        return self.matrix[idx].copy()
+        return self.matrix[idx]
 
     def _update_params(self, params) -> None:
         if self.matrix is None:
-            self.matrix = np.zeros(self.shape)
+            self.set_matrix_trusted(np.zeros(self.shape))
         n, m = self.shape
         # OPTION 1
         # idx = np.tril_indices(n, k=-1, m=m)
@@ -1467,74 +1507,33 @@ class SkewSymmetricMatrix(ConstrainedMatrix):
 # Special Orthogonal
 #----------
 
-class SpecialOrthogonalMatrix(ConstrainedMatrix):
-    _is_elementwise = False
-    _enforce_square = True
-    
-    def __init__(self, shape: tuple[int, int]):
-        if shape[0] != shape[1]:
-            raise ValueError("Shape of matrix must be square")
-        super().__init__(shape)
-        self._underlying_skew_symmetric = SkewSymmetricMatrix(shape)
 
-    @property
-    def is_defined(self):
-        return self._underlying_skew_symmetric.is_defined
+class SpecialOrthogonalMatrix(ConstrainedMatrixWithUnderlying):
 
-    @property
-    def matrix(self):
-        return expm(self._underlying_skew_symmetric.matrix)
-
-    @matrix.setter
-    def matrix(self, matrix: np.ndarray):
-        if matrix.shape != self._shape:
-            raise ValueError(f"Matrix shape mismatch: {matrix.shape} != {self._shape}")
-        self._check_matrix_constrain(matrix)
-        self._underlying_skew_symmetric.matrix = logm(matrix)
-
-    def _check_matrix_constrain(self, matrix):
-        atol = 1e-8
-        is_othogonal = np.allclose(matrix.T @ matrix, np.eye(self.shape[0]), atol=atol)
-        if not is_othogonal:
-            raise ValueError("Matrix must be othogonal")
-        is_SO = np.isclose(np.linalg.det(matrix), 1.0, atol=atol)
-        if not is_SO:
-            raise ValueError("Matrix must be othogonal in SO(n)")
-
-    def _update_params(self, params) -> None:
-        self._underlying_skew_symmetric._update_params(params)
-
-    def _get_params(self) -> np.ndarray:
-        return self._underlying_skew_symmetric.get_params()
-
-    @property
-    def _n_params(self):
-        return self._underlying_skew_symmetric.n_params
-
-
-class SpecialOrthogonalMatrix2(ConstrainedMatrixWithUnderlying):
-    
     _is_elementwise = False
     _enforce_square = True
     
     def __init__(self, shape: tuple[int, int]):
         underlying = SkewSymmetricMatrix(shape)
-        super().__init__(shape, underlying, store_both=False)
-        
+        super().__init__(shape, underlying, store_both=False, run_check_on='underlying')
+
     def _check_matrix_constrain(self, matrix):
         atol = 1e-8
         is_othogonal = np.allclose(matrix.T @ matrix, np.eye(self.shape[0]), atol=atol)
         if not is_othogonal:
-            raise ValueError("Matrix must be othogonal")
+            raise ValueError("Matrix must be orthogonal")
         is_SO = np.isclose(np.linalg.det(matrix), 1.0, atol=atol)
         if not is_SO:
-            raise ValueError("Matrix must be othogonal in SO(n)")
+            raise ValueError("Matrix must be orthogonal in SO(n)")
 
     def _compute_matrix_from_underlying(self) -> np.ndarray:
         return expm(self._underlying.matrix)
     
     def _compute_underlying_from_matrix(self, matrix):
         return logm(matrix)
+
+    def _on_shape_setter(self, shape: tuple):
+        self._underlying.shape = shape
 
 
 SOMatrix = SpecialOrthogonalMatrix
@@ -1546,70 +1545,50 @@ SOMatrix = SpecialOrthogonalMatrix
 STDMatrix = PosDiagLowerTriMatrix
 
 
-class CovMatrix(ConstrainedMatrix):
+class CovMatrix(ConstrainedMatrixWithUnderlying):
+
     _is_elementwise = False
     _enforce_square = True
 
     def __init__(self, shape: tuple[int, int]):
-        if shape[0] != shape[1]:
-            raise ValueError("Shape of matrix must be square")
-        super().__init__(shape)
-        self._underlying_std_matrix = STDMatrix(shape)
+        underlying = STDMatrix(shape)
+        super().__init__(shape, underlying, store_both=False, run_check_on='underlying')
 
-    @property
-    def matrix(self):
-        return self._underlying_std_matrix.matrix @ self._underlying_std_matrix.matrix.T
+    def _compute_matrix_from_underlying(self) -> np.ndarray:
+        return self._underlying.matrix @ self._underlying.matrix.T
 
-    @matrix.setter
-    def matrix(self, matrix: np.ndarray):
-        if matrix.shape != self._shape:
-            raise ValueError(f"Matrix shape mismatch: {matrix.shape} != {self._shape}")
-        chol_cov = np.linalg.cholesky(self.matrix)
-        self._underlying_std_matrix.matrix = chol_cov
+    def _compute_underlying_from_matrix(self, matrix):
+        return np.linalg.cholesky(matrix)
 
     def _check_matrix_constrain(self, matrix):
-        chol_cov = np.linalg.cholesky(self.matrix)
-        self._underlying_std_matrix._check_matrix_constrain(chol_cov)
+        """
+        This method should never be called because all constraint checks
+        are performed on the underlying matrix.
+        """
+        raise RuntimeError(
+            f"{type(self).__name__} does not perform matrix constraint checks; "
+            "they are handled by the underlying matrix."
+        )
 
-    @property
-    def _n_params(self) -> int:
-        return self._underlying_std_matrix.n_params
-
-    def _update_params(self, params) -> None:
-        self._underlying_std_matrix.update_params(params)
-
-    def _get_params(self) -> np.ndarray:
-        return self._underlying_std_matrix.get_params()
+    def _on_shape_setter(self, shape: tuple):
+        self._underlying.shape = shape
 
 
-class SqrtCorrMatrix(ConstrainedMatrix):
+class SqrtCorrMatrix(ConstrainedMatrixWithUnderlying):
     _is_elementwise = False
     _enforce_square = True
 
-    def __init__(self, shape: tuple):
-        if shape[0] != shape[1]:
-            raise ValueError("Shape of matrix must be square")
-        super().__init__(shape)
-        self._underlying_angles = None
+    def __init__(self, shape: tuple[int, int]):
+        dof = shape[0]
+        if dof is not None:
+            dof = (dof - 1) * dof // 2  # integer division
+        underlying = FreeMatrix((dof, 1))
+        super().__init__(shape, underlying, store_both=True, run_check_on='top')
 
-    @property
-    def matrix(self):
-        return self._matrix
-
-    @matrix.setter
-    def matrix(self, matrix: np.ndarray):
-        if matrix.shape != self._shape:
-            raise ValueError(f"Matrix shape mismatch: {matrix.shape} != {self._shape}")
-        self._check_matrix_constrain(matrix)
-        self._underlying_angles = None
-
-    @property
-    def _n_params(self) -> int:
-        return self.shape[0] * (self.shape[0] - 1) // 2
-
-    def _update_params(self, params) -> None:
+    def _compute_matrix_from_underlying(self) -> np.ndarray:
         n = self.shape[0]
         L = np.zeros((n, n))
+        params = self._underlying.matrix[:, 0]
         idx = 0
         for i in range(n):
             if i == 0:
@@ -1627,30 +1606,26 @@ class SqrtCorrMatrix(ConstrainedMatrix):
                     row[j] = prod_sin * np.sin(angles[j])
                     prod_sin *= np.cos(angles[j])
                 row[i] = prod_sin  # last entry
-                L[i, :i+1] = row
-        self._matrix = L
-        self._underlying_angles = params.copy()
+                L[i, :i + 1] = row
+        return L
 
-    def _get_params(self) -> np.ndarray:
-        if self._underlying_angles is None:
-            L = self._matrix
-            params = []
-            n = self.shape[0]
-            for i in range(1, n):
-                row_params = []
-                for j in range(i):
-                    # Compute angle using arcsin of the current entry divided by cumulative product of previous cosines
-                    prod_cos = 1.0
-                    for k in range(j):
-                        prod_cos *= np.cos(row_params[k])
-                    angle = np.arcsin(L[i, j] / prod_cos)
-                    row_params.append(angle)
-                params.extend(row_params)
-            self._underlying_angles = np.array(params)
+    def _compute_underlying_from_matrix(self, matrix):
+        L = self._matrix
+        params = []
+        n = self.shape[0]
+        for i in range(1, n):
+            row_params = []
+            for j in range(i):
+                # Compute angle using arcsin of the current entry divided by cumulative product of previous cosines
+                prod_cos = 1.0
+                for k in range(j):
+                    prod_cos *= np.cos(row_params[k])
+                angle = np.arcsin(L[i, j] / prod_cos)
+                row_params.append(angle)
+            params.extend(row_params)
+        return np.array(params)
 
-        return self._underlying_angles
-
-    def _check_matrix_constrain(self, matrix: np.ndarray):
+    def _check_matrix_constrain(self, matrix):
         """
         Checks that the Cholesky factor L produces a valid correlation matrix.
         """
@@ -1668,24 +1643,65 @@ class SqrtCorrMatrix(ConstrainedMatrix):
         if np.any(eigvals <= 0):
             raise ValueError("Resulting correlation matrix is not positive definite")
 
+    def _on_shape_setter(self, shape: tuple):
+        dof = shape[0]
+        if dof is not None:
+            dof = (dof - 1) * dof // 2  # integer division
+        self._underlying.shape = (dof, 1)
 
-class CorrMatrix(ConstrainedMatrix):
+
+class LogCorrMatrix(ConstrainedMatrix):  # Could use a symmetric matrix as underlying but this is slightly easier i think
     _is_elementwise = False
     _enforce_square = True
 
-    def __init__(self, shape: tuple[int | None, int | None], parameterization: Literal['hyperspherical', 'log']):
+    def __init__(self, shape: tuple[int, int], warm_start: bool = False):
         super().__init__(shape)
+        self._warm_start = warm_start
 
-        self._parameterization = parameterization
-        if parameterization == 'hyperspherical':
-            self._underlying_matrix = SqrtCorrMatrix(shape)
-        elif parameterization == 'log':
-            self._underlying_matrix = SymmetricMatrix(shape)
+    @property
+    def _n_params(self) -> int:
+        if self.has_shape:
+            n = self.shape[0]
+            return (n - 1) * n // 2
+        else:
+            raise ValueError("Matrix has no defined shape. Unknown number of parameters")
+
+    def _update_params(self, params) -> None:
+        if self.matrix is None:
+            matrix = np.zeros(self.shape)
+            self.set_matrix_trusted(matrix)
+        n, m = self.shape
+        idx = np.tril_indices(n, k=-1, m=m)
+        self._matrix[idx] = params
+        self._matrix.T[idx] = params
+        self._matrix = self._calc_matrix_diagonal(self._matrix)
+
+    def _calc_matrix_diagonal(self, matrix):
+        if not self._warm_start:
+            np.fill_diagonal(self._matrix, 0)
+
+        diag_vec = np.diagonal(matrix)
+
+        tol_value = 1e-8
+        n = self.shape[0]
+
+        conv = np.inf
+        iter_number = 0
+        while conv > np.sqrt(n) * tol_value:
+            diag_delta = logm(np.diagonal(expm(matrix)))
+            diag_vec = diag_vec - diag_delta
+            np.fill_diagonal(matrix, diag_vec)
+            conv = np.linalg.norm(diag_delta)
+            iter_number += 1
+
+        return matrix
+
+    def _get_params(self) -> np.ndarray:
+        idx = np.tril_indices(n=self.shape[0], k=-1, m=self.shape[1])
+        return self._matrix[idx]
 
     def _check_matrix_constrain(self, matrix):
-        """
-        Checks that matrix is a valid correlation matrix.
-        """
+        matrix = expm(matrix)
         if not isinstance(matrix, np.ndarray):
             raise TypeError("Matrix must be a numpy array")
         if matrix.shape != self.shape:
@@ -1696,18 +1712,63 @@ class CorrMatrix(ConstrainedMatrix):
         if not np.allclose(matrix, matrix.T, atol=1e-8):
             raise ValueError("Resulting correlation matrix is not symmetric")
         eigvals = np.linalg.eigvalsh(matrix)
-        if np.any(eigvals <= 0):
+        if np.any(eigvals < -1e-12):
             raise ValueError("Resulting correlation matrix is not positive definite")
 
-    @property
-    def _n_params(self) -> int:
-        return self._underlying_matrix.n_params
 
-    def _update_params(self, params) -> None:
-        self._underlying_matrix.update_params(params)
+class CorrMatrix(ConstrainedMatrixWithUnderlying):
+    _is_elementwise = False
+    _enforce_square = True
 
-    def _get_params(self) -> np.ndarray:
-        return self._underlying_matrix.get_params()
+    def __init__(self, shape: tuple[int | None, int | None], parameterization: Literal['hyperspherical', 'log']):
+
+        self._parameterization = parameterization
+        if parameterization == 'hyperspherical':
+            underlying = SqrtCorrMatrix(shape)
+        elif parameterization == 'log':
+            underlying = LogCorrMatrix(shape)
+        else:
+            raise ValueError(f"Correlation matrix parameterization must be log or hyperspherical")
+
+        super().__init__(shape, underlying, store_both=False, run_check_on='top')
+
+
+    def _compute_underlying_from_matrix(self, matrix):
+        if self._parameterization == 'hyperspherical':
+            return np.linalg.cholesky(matrix)
+        elif self._parameterization == 'log':
+            lm = logm(matrix)
+            return np.real_if_close(lm, tol=1e-12)
+        else:
+            raise ValueError(f"Correlation matrix parameterization must be log or hyperspherical")
+
+    def _compute_matrix_from_underlying(self) -> np.ndarray:
+        if self._parameterization == 'hyperspherical':
+            return self._underlying.matrix @ self._underlying.matrix.T
+        elif self._parameterization == 'log':
+            # Use expm and ensure real part
+            em = expm(self._underlying.matrix)
+            return np.real_if_close(em, tol=1e-12)
+        else:
+            raise ValueError(f"Correlation matrix parameterization must be log or hyperspherical")
+
+    def _on_shape_setter(self, shape: tuple):
+        self._underlying.shape = shape
+
+    def _check_matrix_constrain(self, matrix):
+        if not isinstance(matrix, np.ndarray):
+            raise TypeError("Matrix must be a numpy array")
+        if matrix.shape != self.shape:
+            raise ValueError(f"Matrix must be {self.shape}")
+
+        if not np.allclose(np.diag(matrix), 1.0, atol=1e-8):
+            raise ValueError("Resulting correlation matrix diagonal is not 1")
+        if not np.allclose(matrix, matrix.T, atol=1e-8):
+            raise ValueError("Resulting correlation matrix is not symmetric")
+        eigvals = np.linalg.eigvalsh(matrix)
+        if np.any(eigvals < -1e-12):
+            raise ValueError("Resulting correlation matrix is not positive definite")
+
 
 # ----------
 # Testing
@@ -1829,14 +1890,11 @@ if __name__ == "__main__":
     mat0 = matrix_options[i](shape0)
     mat0.matrix = randoms0[i]
 
-    mat01 = SpecialOrthogonalMatrix2(shape0)
-    mat01.matrix = randoms0[i]
-
     mat1 = matrix_options[j](shape1)
     mat1.matrix = randoms0[j]
 
 
-    mat_comb = CompositeConstraintMatrix([mat01, mat1], combine='hstack')
+    mat_comb = CompositeConstraintMatrix([mat0, mat1], combine='hstack')
 
     rnd_mat = np.hstack([randoms0[i], randoms1[j]])
 
