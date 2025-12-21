@@ -218,7 +218,7 @@ class ConstrainedMatrix(Signal, ABC):
         def func(x):
             self._update_params(x)
             return self.get_vectorized(order)
-        Jac = numerical_jacobian(func, params_now)
+        Jac = numerical_jacobian(func, params_now, epsilon=1e-6)
         self._update_params(params_now)
         return Jac
 
@@ -435,6 +435,10 @@ class ConstrainedMatrixWithUnderlying(ConstrainedMatrix, ABC):
             self._matrix = matrix
 
         return matrix
+
+    @matrix.setter
+    def matrix(self, value):
+        self._matrix_setter(value, run_check=True)
 
     @property
     def is_defined(self):
@@ -1623,7 +1627,7 @@ class SqrtCorrMatrix(ConstrainedMatrixWithUnderlying):
                 angle = np.arcsin(L[i, j] / prod_cos)
                 row_params.append(angle)
             params.extend(row_params)
-        return np.array(params)
+        return np.array(params).reshape(-1, 1)
 
     def _check_matrix_constrain(self, matrix):
         """
@@ -1674,27 +1678,24 @@ class LogCorrMatrix(ConstrainedMatrix):  # Could use a symmetric matrix as under
         idx = np.tril_indices(n, k=-1, m=m)
         self._matrix[idx] = params
         self._matrix.T[idx] = params
-        self._matrix = self._calc_matrix_diagonal(self._matrix)
+        self._calc_matrix_diagonal(self._matrix)  # in-place modification
 
     def _calc_matrix_diagonal(self, matrix):
         if not self._warm_start:
             np.fill_diagonal(self._matrix, 0)
 
-        diag_vec = np.diagonal(matrix)
-
         tol_value = 1e-8
-        n = self.shape[0]
 
+        diag_vec = np.diag(matrix)
+        n = matrix.shape[0]
         conv = np.inf
-        iter_number = 0
+        # iter_number = 0
         while conv > np.sqrt(n) * tol_value:
-            diag_delta = logm(np.diagonal(expm(matrix)))
+            diag_delta = np.log(np.diag(expm(matrix)))
             diag_vec = diag_vec - diag_delta
             np.fill_diagonal(matrix, diag_vec)
             conv = np.linalg.norm(diag_delta)
-            iter_number += 1
-
-        return matrix
+            # iter_number += 1
 
     def _get_params(self) -> np.ndarray:
         idx = np.tril_indices(n=self.shape[0], k=-1, m=self.shape[1])
@@ -1715,6 +1716,14 @@ class LogCorrMatrix(ConstrainedMatrix):  # Could use a symmetric matrix as under
         if np.any(eigvals < -1e-12):
             raise ValueError("Resulting correlation matrix is not positive definite")
 
+    def numerical_jacobian_vec_params(self, order: Literal['F', 'C'] = 'C'):
+        old = self._warm_start
+        self._warm_start = True
+        try:
+            return super().numerical_jacobian_vec_params(order)
+        finally:
+            self._warm_start = old
+
 
 class CorrMatrix(ConstrainedMatrixWithUnderlying):
     _is_elementwise = False
@@ -1726,12 +1735,11 @@ class CorrMatrix(ConstrainedMatrixWithUnderlying):
         if parameterization == 'hyperspherical':
             underlying = SqrtCorrMatrix(shape)
         elif parameterization == 'log':
-            underlying = LogCorrMatrix(shape)
+            underlying = LogCorrMatrix(shape, warm_start=False)
         else:
             raise ValueError(f"Correlation matrix parameterization must be log or hyperspherical")
 
         super().__init__(shape, underlying, store_both=False, run_check_on='top')
-
 
     def _compute_underlying_from_matrix(self, matrix):
         if self._parameterization == 'hyperspherical':
@@ -1883,26 +1891,36 @@ if __name__ == "__main__":
                       CovMatrix, CorrMatrix]
 
 
-    i, j = 13, 6
+    i = len(matrix_options) - 1
 
-    print((matrix_options[i], matrix_options[j]))
+    print((matrix_options[i]))
 
-    mat0 = matrix_options[i](shape0)
-    mat0.matrix = randoms0[i]
+    mat0 = CorrMatrix(shape0, parameterization='hyperspherical')
+    mat0.set_matrix(randoms0[i])
+    mat1 = CorrMatrix(shape0, parameterization='log')
+    mat1.set_matrix(randoms0[i])
 
-    mat1 = matrix_options[j](shape1)
-    mat1.matrix = randoms0[j]
+    rep_random = 1000
+    start_time = time.time()
+    for _ in range(rep_random):
+        new_params = np.random.rand(mat0.n_params)
+        mat1.update_params(new_params)
+        jac = mat1.jacobian_vec_params(order='F')
+    end_time = time.time()
+    print(f"Elapsed time: {end_time - start_time}")
 
+    print(jac)
 
-    mat_comb = CompositeConstraintMatrix([mat0, mat1], combine='hstack')
+    rep_random = 1000
+    start_time = time.time()
+    for _ in range(rep_random):
+        new_params = np.random.rand(mat0.n_params)
+        mat0.update_params(new_params)
+        jac = mat0.jacobian_vec_params(order='F')
+    end_time = time.time()
+    print(f"Elapsed time: {end_time - start_time}")
 
-    rnd_mat = np.hstack([randoms0[i], randoms1[j]])
-
-    print(rnd_mat)
-
-    mat_comb.matrix = rnd_mat
-
-    print(mat_comb.get_params())
+    print(jac)
 
     # print(mat_comb.jacobian_vec_params())
 

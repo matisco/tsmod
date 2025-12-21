@@ -12,13 +12,13 @@ from optimization_objectives import OptimizationObjective, GaussianNLL
 # from deterministic import DeterministicProcess, DeterministicModel
 from constrained_matrices import (ConstrainedMatrix,
                                   UnitTopRowConstrained as UnitTopRowMatrix,
-                                  FreeMatrix as FreeMatrix,
-                                  PosDiagonalMatrix as PosDiagonalMatrix,
-                                  IdentityMatrix as IdentityMatrix,
-                                  DiagonalMatrix as DiagonalMatrix,
-                                  ZeroMatrix as ZeroMatrix,
-                                  PosDiagLowerTriMatrix as STDMatrix,
-                                  CorrelationConstraint as CorrMatrix)
+                                  FreeMatrix,
+                                  PosDiagonalMatrix,
+                                  IdentityMatrix,
+                                  DiagonalMatrix,
+                                  ZeroMatrix,
+                                  STDMatrix,
+                                  CorrMatrix)
 
 
 from tsmod.base import Signal, Model, ModelFit, CompositeSignal, CompositeModel, check_is_defined
@@ -326,19 +326,53 @@ class LinearStateSpaceModelRepresentation(LinearStateProcessRepresentation):
 
 class LinearStateProcess(Model, ABC):
 
-    # _scale_constrain_to_underlying_map = {'free': STDMatrix,
-    #                                       'identity': IdentityMatrix,
-    #                                       'diagonal': PosDiagonalMatrix,
-    #                                       'correlation': CorrMatrix}
+    class AdvancedOptions:
+        """Holds advanced, context-specific options."""
+
+        _valid_options = {
+            "correlation_parameterization": ["hyperspherical", "log"]
+        }
+
+        def __init__(self, **kwargs):
+            # Initialize options, validated through __setattr__
+            for name, value in kwargs.items():
+                setattr(self, name, value)
+
+        def __setattr__(self, name, value):
+            # Validate known options
+            valid = self.get_valid_options().get(name)
+            if valid is not None and value not in valid:
+                raise ValueError(f"{name} must be one of {valid}")
+            super().__setattr__(name, value)
+
+        def set_option(self, name, value):
+            setattr(self, name, value)
+
+        @classmethod
+        def get_valid_options(cls):
+            # Merge parent _valid_options dynamically
+            merged = {}
+            for base in reversed(cls.__mro__):
+                if hasattr(base, "_valid_options"):
+                    merged.update(base._valid_options)
+            return merged
 
     _scale_constrain_options = ["free", "identity", "diagonal", "correlation"]
 
-    def __init__(self, shape: tuple, innovation_dim: int, **kwargs):
-        super().__init__(shape, **kwargs)
+    def __init__(self, shape: tuple, innovation_dim: int, advanced_options: Optional[AdvancedOptions] = None):
+        super().__init__(shape)
+
+        self._advanced_options = advanced_options or self.AdvancedOptions()
 
         self._innovation_dim = innovation_dim
         self._scale_constrain = 'free'
         self._underlying_scale_matrix = STDMatrix((self._innovation_dim, self._innovation_dim))
+
+    def set_advanced_option(self, name: str, value):
+        """Set an advanced option by name."""
+        if not hasattr(self._advanced_options, name):
+            raise AttributeError(f"{name} is not a valid advanced option")
+        setattr(self._advanced_options, name, value)
 
     @property
     def innovation_dim(self) -> int:
@@ -390,7 +424,8 @@ class LinearStateProcess(Model, ABC):
         elif self._scale_constrain == 'diagonal':
             return self._underlying_scale_matrix.matrix ** 2
         elif self._scale_constrain == 'correlation':
-            return self._underlying_scale_matrix.matrix
+            mat = self._underlying_scale_matrix.matrix
+            return mat @ mat.T
         else:
             raise ValueError("Scale constraint must be one of: free, identity, diagonal, correlation")
 
@@ -402,7 +437,7 @@ class LinearStateProcess(Model, ABC):
         self._underlying_scale_matrix = PosDiagonalMatrix((self._innovation_dim, self._innovation_dim))
 
     def _constrain_scale_to_correlation(self):
-        self._underlying_scale_matrix = CorrMatrix((self._innovation_dim, self._innovation_dim))
+        self._underlying_scale_matrix = CorrMatrix((self._innovation_dim, self._innovation_dim), parameterization="hyperspherical")  # TODO: support different parameterization
 
     def _constrain_scale_to_free(self):
         self._underlying_scale_matrix = STDMatrix((self._innovation_dim, self._innovation_dim))

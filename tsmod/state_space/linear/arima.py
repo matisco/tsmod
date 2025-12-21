@@ -19,16 +19,29 @@ from arfima_utils import (transformed_pacfs_to_coeffs,
 
 class ARIMA(LinearStateProcess):
 
-    _possible_representation_choices = ["harvey", "hamilton", "ihamilton"]
+    class AdvancedOptions(LinearStateProcess.AdvancedOptions):
 
-    _possible_first_estimates = ["two_step", "ma_matching"]
+        _valid_options = {
+            "representation": ["harvey", "hamilton", "ihamilton"],
+            "first_estimation_method": ["ma_matching", "two_step"],
+        }
+
+        def __init__(
+            self,
+            correlation_parameterization="hyperspherical",
+            representation="harvey",
+            first_estimation_method="ma_matching"
+        ):
+            super().__init__(**{k: v for k, v in locals().items() if k != "self"})
 
     def __init__(self,
                  order = Tuple[int, int, int],
                  enforce_stability = True,
-                 enforce_invertibility = True):
+                 enforce_invertibility = True,
+                 advanced_options: AdvancedOptions = None,):
 
-        super().__init__(shape=(1,1))
+        advanced_options = advanced_options or self.AdvancedOptions()
+        super().__init__(shape=(1,1), advanced_options=advanced_options)
 
         self._order = order
         self._enforce_stability = enforce_stability
@@ -36,23 +49,6 @@ class ARIMA(LinearStateProcess):
 
         self._ar_coeffs = None if self.order[0] > 0 else np.array([])
         self._ma_coeffs = None if self.order[2] > 0 else np.array([])
-
-        self._representation_choice = 'harvey'
-        self._first_estimation_method = 'ma_matching'
-
-    def set_representation_type(self, value):
-        if value.lower() not in self._possible_representation_choices:
-            raise ValueError("Unsupported representation type")
-
-        self._representation_choice = value.lower()
-        return self
-
-    def set_first_estimation_method(self, value):
-        if value.lower() not in self._possible_first_estimates:
-            raise ValueError("Unsupported first estimation method choice")
-
-        self._first_estimation_method = value.lower()
-        return self
 
     @property
     def is_dynamics_defined(self):
@@ -227,27 +223,33 @@ class ARIMA(LinearStateProcess):
     @property
     def state_dim(self) -> int:
         p, k, q = self.order
-        if self._representation_choice == "hamilton":
+        if self._advanced_options.representation == "hamilton":
             return max([p + k, q + 1])
-        elif self._representation_choice == "ihamilton":
+        elif self._advanced_options.representation == "ihamilton":
             return max([p, q + 1]) + k
-        elif self._representation_choice == "harvey":
+        elif self._advanced_options.representation == "harvey":
             return max(p, q + 1) + k
         else:
-            raise ValueError(f"Unknown representation choice: {self._representation_choice}")
+            raise ValueError(
+                f"Unknown representation choice. Valid choices are "
+                f"{self._advanced_options.get_valid_options()['representation']}"
+            )
 
     def representation(self, *args, **kwargs) -> LinearStateProcessRepresentation:
         phis = self.ar_coeffs
         thetas = self.ma_coeffs
         k = self.order[1]
-        if self._representation_choice == "hamilton":
+        if self._advanced_options.representation == "hamilton":
             M, F, R = representation_hamilton(phis, k, thetas)
-        elif self._representation_choice == "ihamilton":
+        elif self._advanced_options.representation == "ihamilton":
             M, F, R = representation_ihamilton(phis, k, thetas)
-        elif self._representation_choice == "harvey":
+        elif self._advanced_options.representation == "harvey":
             M, F, R = representation_harvey(phis, k, thetas)
         else:
-            raise ValueError(f"Unknown representation choice: {self._representation_choice}")
+            raise ValueError(
+                f"Unknown representation choice. Valid choices are "
+                f"{self._advanced_options.get_valid_options()['representation']}"
+            )
 
         return LinearStateProcessRepresentation(M, F, R)
 
@@ -293,7 +295,7 @@ class ARIMA(LinearStateProcess):
             theta, _ = fit_ar_ols(res, q)
             self.ma_coeffs = -theta  # AR residual model corresponds to MA in ARMA
 
-        if self._first_estimation_method == "ma_matching":
+        if self._advanced_options.first_estimation_method == "ma_matching":
 
             phis_, _ = fit_ar_ols(differenced_series, p + q + 1)
             T = series.shape[0]
@@ -338,13 +340,13 @@ if __name__ == "__main__":
     simulated_series = 0.5 * generate_arfima_from_coeffs(phis, k, thetas, 1000) + noise
 
     arima = ARIMA(order=(p, k, q), enforce_stability=True, enforce_invertibility=True)
-    arima.set_first_estimation_method("ma_matching")
+    arima.set_advanced_option("first_estimation_method", "ma_matching")
 
     print(f"phis: {phis}, k: {k}, thetas: {thetas}")
 
 
     for rep in ["hamilton", "ihamilton", "harvey"]:
-        arima.set_representation_type(rep)
+        arima.set_advanced_option("representation", rep)
 
         arima._first_fit_to(simulated_series.reshape(-1, 1))
 
