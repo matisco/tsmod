@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Tuple, Literal
 import numpy as np
 
 # from base import ModelFit
@@ -20,6 +20,9 @@ from arfima_utils import (transformed_pacfs_to_coeffs,
 class ARIMA(LinearStateProcess):
 
     class AdvancedOptions(LinearStateProcess.AdvancedOptions):
+
+        representation: Literal["harvey", "hamilton", "ihamilton"]
+        first_estimation_method: Literal["ma_matching", "two_step"]
 
         _valid_options = {
             "representation": ["harvey", "hamilton", "ihamilton"],

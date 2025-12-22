@@ -1,9 +1,9 @@
-import numpy as np
-
+from dataclasses import dataclass
 from abc import ABC, abstractmethod
 from typing import Optional, Union, Any, Literal
 from functools import cached_property  # wraps
 
+import numpy as np
 from scipy.linalg import block_diag
 from scipy.optimize import minimize
 from scipy.linalg import solve_triangular
@@ -324,10 +324,19 @@ class LinearStateSpaceModelRepresentation(LinearStateProcessRepresentation):
 # "Latent" process, and composite "latent" process
 # ---------
 
+@dataclass(frozen=True)
+class RotationalSymmetry:
+    block: tuple[int, ...]     # latent indices
+    reason: str | None = None
+
+
 class LinearStateProcess(Model, ABC):
 
     class AdvancedOptions:
         """Holds advanced, context-specific options."""
+
+        # to provide IDE help:
+        correlation_parameterization: Literal["hyperspherical", "log"]
 
         _valid_options = {
             "correlation_parameterization": ["hyperspherical", "log"]
@@ -335,6 +344,9 @@ class LinearStateProcess(Model, ABC):
 
         def __init__(self, **kwargs):
             # Initialize options, validated through __setattr__
+            n_options = len(self.get_valid_options())
+            if not len(kwargs) == n_options:
+                raise ValueError("Incorrect number of arguments. All options need to be filled")
             for name, value in kwargs.items():
                 setattr(self, name, value)
 
@@ -359,7 +371,10 @@ class LinearStateProcess(Model, ABC):
 
     _scale_constrain_options = ["free", "identity", "diagonal", "correlation"]
 
-    def __init__(self, shape: tuple, innovation_dim: int, advanced_options: Optional[AdvancedOptions] = None):
+    def __init__(self,
+                 shape: tuple,
+                 innovation_dim: int,
+                 advanced_options: Optional[AdvancedOptions] = None):
         super().__init__(shape)
 
         self._advanced_options = advanced_options or self.AdvancedOptions()
@@ -399,37 +414,51 @@ class LinearStateProcess(Model, ABC):
     def std(self):
         if not self._underlying_scale_matrix.is_defined:
             return None
+        return self._std_from_scale()
 
-        if self._scale_constrain == 'free':
-            return self._underlying_scale_matrix.matrix
-        elif self._scale_constrain == 'identity':
-            return self._underlying_scale_matrix.matrix
-        elif self._scale_constrain == 'diagonal':
-            return self._underlying_scale_matrix.matrix
-        elif self._scale_constrain == 'correlation':
-            return self._underlying_scale_matrix.matrix
-        else:
-            raise ValueError("Scale constraint must be one of: free, identity, diagonal, correlation")
+    def _std_from_scale(self):
+        mat = self._underlying_scale_matrix.matrix
+
+        return {
+            "free": lambda: mat,
+            "identity": lambda: mat,
+            "diagonal": lambda: mat,
+            "correlation": self._std_from_correlation,
+        }[self._scale_constrain]()
+
+    def _std_from_correlation(self):
+        corr = self._underlying_scale_matrix.matrix
+
+        return {
+            "hyperspherical": lambda: corr,
+            "log": lambda: np.linalg.cholesky(corr),
+        }[self._advanced_options.correlation_parameterization]()
 
     @property
     def cov(self):
         if not self._underlying_scale_matrix.is_defined:
             return None
+        return self._cov_from_scale()
 
-        if self._scale_constrain == 'free':
-            mat = self._underlying_scale_matrix.matrix
-            return mat @ mat.T
-        elif self._scale_constrain == 'identity':
-            return self._underlying_scale_matrix.matrix
-        elif self._scale_constrain == 'diagonal':
-            return self._underlying_scale_matrix.matrix ** 2
-        elif self._scale_constrain == 'correlation':
-            mat = self._underlying_scale_matrix.matrix
-            return mat @ mat.T
-        else:
-            raise ValueError("Scale constraint must be one of: free, identity, diagonal, correlation")
+    def _cov_from_scale(self):
+        mat = self._underlying_scale_matrix.matrix
 
-    def _constrain_scale_to_identity(self, previous_scale_constraint):
+        return {
+            "free": lambda: mat @ mat.T,
+            "identity": lambda: mat,
+            "diagonal": lambda: mat ** 2,
+            "correlation": self._cov_from_correlation,
+        }[self._scale_constrain]()
+
+    def _cov_from_correlation(self):
+        mat = self._underlying_scale_matrix.matrix
+
+        return {
+            "hyperspherical": lambda: mat @ mat.T,
+            "log": lambda: mat,
+        }[self._advanced_options.correlation_parameterization]()
+
+    def _constrain_scale_to_identity(self, previous_scale_constraint):  # TODO: keep previous matrix values
         self._underlying_scale_matrix = IdentityMatrix((self._innovation_dim, self._innovation_dim))
 
     def _constrain_scale_to_diagonal(self, previous_scale_constraint):
@@ -456,21 +485,19 @@ class LinearStateProcess(Model, ABC):
     def is_dynamics_defined(self) -> bool:
         raise NotImplementedError
 
-    @abstractmethod
     def _update_params(self, params: np.ndarray) -> None:
-        self._scale.update_params(params[:self._scale.n_params])
-        self._update_params(params[self._scale.n_params:])
+        self._underlying_scale_matrix.update_params(params[:self._underlying_scale_matrix.n_params])
+        self._update_params(params[self._underlying_scale_matrix.n_params:])
 
-    @abstractmethod
     def _get_params(self) -> np.ndarray:
         params = np.empty((self.n_params,))
-        params[:self._scale.n_params] = self._scale.get_params()
-        params[self._scale.n_params:] = self._get_dynamic_params()
+        params[:self._underlying_scale_matrix.n_params] = self._underlying_scale_matrix.get_params()
+        params[self._underlying_scale_matrix.n_params:] = self._get_dynamic_params()
         return params
 
     @property
     def _n_params(self) -> int:
-        return self.n_dynamic_params + self._scale.n_params
+        return self.n_dynamic_params + self._underlying_scale_matrix.n_params
 
     @property
     @abstractmethod
@@ -490,6 +517,16 @@ class LinearStateProcess(Model, ABC):
         """
         Set only the concrete subclass parameters from a 1D array.
         Do NOT include scale parameters; the base class will handle those.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def _declare_rotational_symmetries(self) -> list[RotationalSymmetry]:
+        """
+        Declare continuous rotational invariances of the latent state.
+
+        Each symmetry must specify the latent block on which
+        orthogonal transformations leave the likelihood invariant.
         """
         raise NotImplementedError
 
@@ -554,7 +591,7 @@ class LinearStateProcess(Model, ABC):
     def _build_state_space_model(self,
                                  series,
                                  include_constant: bool,
-                                 measurement_noise: Optional[Literal["zero", "diagonal", "full"]]) -> "LinearStateSpaceModel":
+                                 measurement_noise: Optional[Literal["zero", "diagonal", "full"]]) -> "LinearStateSpaceModel": # TODO
         """
         Can be overwritten.
 
@@ -616,18 +653,6 @@ class LinearStateProcess(Model, ABC):
 
 class CompositeLinearStateProcess(CompositeModel, LinearStateProcess):
 
-    def _update_dynamic_params(self, params: np.ndarray):
-        pass
-
-
-    def _get_dynamic_params(self) -> np.ndarray:
-        pass
-
-    @property
-    def n_dynamic_params(self) -> int:
-        pass
-
-
     def __init__(self, processes: list[LinearStateProcess], mixing_matrix: np.ndarray):
         self._underlying_processes = processes
         self._mixing_matrix = mixing_matrix
@@ -653,6 +678,23 @@ class CompositeLinearStateProcess(CompositeModel, LinearStateProcess):
 
         if not self._mixing_matrix.shape[1] == shape_of_underlying:
             raise ValueError("Shape missmatch. Mixing matrix with .")
+
+    def _declare_rotational_symmetries(self) -> list[RotationalSymmetry]: # TODO
+        pass
+
+    @property
+    def is_dynamics_defined(self) -> bool:
+        return all(lsp.is_dynamics_defined for lsp in self._underlying_processes)
+
+    def _update_dynamic_params(self, params: np.ndarray): # TODO
+        pass
+
+    def _get_dynamic_params(self) -> np.ndarray:  # TODO
+        pass
+
+    @property
+    def n_dynamic_params(self) -> int:
+        return sum(lsp.n_dynamic_params for lsp in self._underlying_processes)
 
     @property
     def mixing_matrix(self) -> np.ndarray:
