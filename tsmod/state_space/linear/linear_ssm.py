@@ -11,21 +11,16 @@ from scipy.optimize import minimize
 from optimization_objectives import OptimizationObjective, GaussianNLL
 
 from constrained_matrices import (ConstrainedMatrix,
-                                  UnitTopRowConstrained as UnitTopRowMatrix,
                                   FreeMatrix,
-                                  PosDiagonalMatrix,
                                   IdentityMatrix,
-                                  DiagonalMatrix,
                                   ZeroMatrix,
-                                  STDMatrix,
-                                  CorrMatrix,
                                   ElementWiseConstrainedMatrix,
                                   ConstrainedCovarianceAPI)
 
 
 from base import Signal, Model, ModelFit, CompositeSignal, CompositeModel, check_is_defined
 from base import ForecastResult, DeterministicForecastResult, NormalForecastResult
-from tools.utils import validate_covariance, validate_chol_factor
+from tools.utils import validate_covariance, validate_chol_factor, covariance_to_correlation
 from state_space.tools.kalman_filter import (KalmanFilter,
                                              KalmanFilterResult,
                                              KalmanFilterInitialization)
@@ -35,8 +30,7 @@ from representation import LinearStateSpaceModelRepresentation, LinearStateProce
 from utils import numerical_jacobian
 
 # TODO: HIGH PRIORITY
-#       1. Add support for changing the correlation matrix parameterization after it is defined, or dont allow it to happen
-#       2. Change EM, currently its wrong because the representation was changed
+#       1. Change EM, currently its wrong because the representation was changed
 
 # TODO: MEDIUM PRIORITY
 #       1. Add adaptive step to EM optimization (should take very little effort)
@@ -214,6 +208,7 @@ class LinearStateProcess(Model, ABC):
             "correlation_parameterization": ["hyperspherical", "log"]
         }
 
+        # CONSIDER: Allowing reparemeterization of correlation matrix after init
         _immutable_options = ("correlation_parameterization",)
 
         def __init__(self, **kwargs):
@@ -458,6 +453,33 @@ class LinearStateProcess(Model, ABC):
         """
         raise NotImplementedError
 
+    def _cov_to_constrained_cov(self, cov: np.ndarray, validate: bool) -> np.ndarray:
+        """
+        Helper function for concrete subclasses to use to set the covariance matrix
+
+        Args:
+            cov: covariance matrix
+            validate: (bool) flag indicating if the covariance matrix is checked
+
+        Returns:
+            covariance matrix conforming to self.scale_constrain
+
+        """
+        if validate:
+            validate_covariance(cov)
+
+        _scale_constrain_options = ("free", "identity", "diagonal", "correlation")
+
+        if self._scale_constrain == 'identity':
+            return np.eye(self._innovation_dim)
+        elif self._scale_constrain == 'free':
+            return cov
+        elif self._scale_constrain == 'diagonal':
+            return np.diag(np.diag(cov))
+        elif self._scale_constrain == 'correlation':
+            return covariance_to_correlation(cov)
+        else:
+            raise ValueError("Unknown scale constraint")
 
     def get_identifiable_state_space_model(self,
                              include_constant: bool,
