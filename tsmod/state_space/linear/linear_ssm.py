@@ -214,6 +214,8 @@ class LinearStateProcess(Model, ABC):
             "correlation_parameterization": ["hyperspherical", "log"]
         }
 
+        _immutable_options = ("correlation_parameterization",)
+
         def __init__(self, **kwargs):
             # Initialize options, validated through __setattr__
             n_options = len(self.get_valid_options())
@@ -223,6 +225,10 @@ class LinearStateProcess(Model, ABC):
                 setattr(self, name, value)
 
         def __setattr__(self, name, value):
+            # check that attribute is not immutable. second clause allows initialization
+            if name in self.get_immutable_options() and name in self.__dict__ :
+                raise ValueError(f"{name} is an immutable option. I.e., it can only be set at init")
+
             # Validate known options
             valid = self.get_valid_options().get(name)
             if valid is not None and value not in valid:
@@ -239,6 +245,15 @@ class LinearStateProcess(Model, ABC):
             for base in reversed(cls.__mro__):
                 if hasattr(base, "_valid_options"):
                     merged.update(base._valid_options)
+            return merged
+
+        @classmethod
+        def get_immutable_options(cls):
+            # Merge parent _valid_options dynamically
+            merged = tuple()
+            for base in reversed(cls.__mro__):
+                if hasattr(base, "_immutable_options"):
+                    merged += base._immutable_options
             return merged
 
     _scale_constrain_options = ("free", "identity", "diagonal", "correlation")
@@ -448,6 +463,7 @@ class LinearStateProcess(Model, ABC):
                              include_constant: bool,
                              measurement_noise: Literal["free", "zero", "diagonal"]) -> "LinearStateSpaceModel":
 
+        # CONSIDER: LinearStateProcess can implement some properties to say that scale or rotation are fixed
         scale_map = {
             'free': (False, False),
             'identity': (True, False),
