@@ -1846,10 +1846,10 @@ class ConstrainedCovarianceAPI(Signal):
             if shape[0] != shape[1]:
                 raise ValueError("Shape of matrix must be square")
 
-        if constrain not in self._constrain_options:
+        if constrain.lower() not in self._constrain_options:
             raise ValueError(f"Constraint must be one of {self._constrain_options}")
 
-        self._constrain = constrain
+        self._constrain = constrain.lower()
         self._correlation_parameterization = "hyperspherical"
 
 
@@ -1866,7 +1866,7 @@ class ConstrainedCovarianceAPI(Signal):
                                         "correlation": _corr_parameterization_to_underlying_map[self._correlation_parameterization],
                                         }
 
-        self._underlying_constrained_matrix = _constrain_to_underlying_map[constrain](shape)
+        self._underlying_constrained_matrix = _constrain_to_underlying_map[self._constrain](shape)
 
 
         # manual caching

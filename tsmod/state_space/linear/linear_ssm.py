@@ -19,7 +19,8 @@ from constrained_matrices import (ConstrainedMatrix,
                                   ZeroMatrix,
                                   STDMatrix,
                                   CorrMatrix,
-                                  ElementWiseConstrainedMatrix)
+                                  ElementWiseConstrainedMatrix,
+                                  ConstrainedCovarianceAPI)
 
 
 from base import Signal, Model, ModelFit, CompositeSignal, CompositeModel, check_is_defined
@@ -255,8 +256,8 @@ class LinearStateProcess(Model, ABC):
         if not scale_constrain.lower() in self._scale_constrain_options:
             raise ValueError(f"Invalid scale_constrain: {scale_constrain}")
         self._scale_constrain = scale_constrain.lower()
-        self._underlying_scale_matrix = None
-        getattr(self, f'_constrain_scale_to_{scale_constrain}')()
+        self._cov_api = ConstrainedCovarianceAPI(shape=(self._innovation_dim, self._innovation_dim),
+                                                 constrain=self._scale_constrain)
 
     @property
     def advanced_options(self):
@@ -279,64 +280,37 @@ class LinearStateProcess(Model, ABC):
 
     @property
     def std(self):
-        if not self._underlying_scale_matrix.is_defined:
+        if not self._cov_api.is_defined:
             return None
-        return self._std_from_scale()
 
-    def _std_from_scale(self):
-        mat = self._underlying_scale_matrix.matrix
+        return self._cov_api.std
 
-        return {
-            "free": lambda: mat,
-            "identity": lambda: mat,
-            "diagonal": lambda: mat,
-            "correlation": self._std_from_correlation,
-        }[self._scale_constrain]()
-
-    def _std_from_correlation(self):
-        corr = self._underlying_scale_matrix.matrix
-
-        return {
-            "hyperspherical": lambda: corr,
-            "log": lambda: np.linalg.cholesky(corr),
-        }[self._advanced_options.correlation_parameterization]()
+    @std.setter
+    def std(self, value):
+        self._std_setter(value, True)
 
     @property
     def cov(self):
-        if not self._underlying_scale_matrix.is_defined:
+        if not self._cov_api.is_defined:
             return None
-        return self._cov_from_scale()
 
-    def _cov_from_scale(self):
-        mat = self._underlying_scale_matrix.matrix
+        return self._cov_api.cov
 
-        return {
-            "free": lambda: mat @ mat.T,
-            "identity": lambda: mat,
-            "diagonal": lambda: mat ** 2,
-            "correlation": self._cov_from_correlation,
-        }[self._scale_constrain]()
+    @cov.setter
+    def cov(self, value):
+        self._cov_setter(value, True)
 
-    def _cov_from_correlation(self):
-        mat = self._underlying_scale_matrix.matrix
+    def _std_setter(self, value, validate: bool = True):
+        if validate:
+            self._cov_api.set_std(value)
+        else:
+            self._cov_api.set_std_trusted(value)
 
-        return {
-            "hyperspherical": lambda: mat @ mat.T,
-            "log": lambda: mat,
-        }[self._advanced_options.correlation_parameterization]()
-
-    def _constrain_scale_to_identity(self):
-        self._underlying_scale_matrix = IdentityMatrix((self._innovation_dim, self._innovation_dim))
-
-    def _constrain_scale_to_diagonal(self):
-        self._underlying_scale_matrix = PosDiagonalMatrix((self._innovation_dim, self._innovation_dim))
-
-    def _constrain_scale_to_correlation(self):
-        self._underlying_scale_matrix = CorrMatrix((self._innovation_dim, self._innovation_dim),
-                                                   parameterization=self._advanced_options.correlation_parameterization)
-
-    def _constrain_scale_to_free(self):
-        self._underlying_scale_matrix = STDMatrix((self._innovation_dim, self._innovation_dim))
+    def _cov_setter(self, value, validate: bool = True):
+        if validate:
+            self._cov_api.set_cov(value)
+        else:
+            self._cov_api.set_cov_trusted(value)
 
     @property
     @abstractmethod
@@ -345,7 +319,7 @@ class LinearStateProcess(Model, ABC):
 
     @property
     def is_defined(self) -> bool:
-        return self._underlying_scale_matrix.is_defined and self.is_dynamics_defined
+        return self._cov_api.is_defined and self.is_dynamics_defined
 
     @property
     @abstractmethod
@@ -358,18 +332,20 @@ class LinearStateProcess(Model, ABC):
         raise NotImplementedError
 
     def _update_params(self, params: np.ndarray) -> None:
-        self._underlying_scale_matrix.update_params(params[:self._underlying_scale_matrix.n_params])
-        self._update_dynamic_params(params[self._underlying_scale_matrix.n_params:])
+        n = self._cov_api.n_params
+        self._cov_api.update_params(params[:n])
+        self._update_dynamic_params(params[n:])
 
     def _get_params(self) -> np.ndarray:
         params = np.empty((self.n_params,))
-        params[:self._underlying_scale_matrix.n_params] = self._underlying_scale_matrix.get_params()
-        params[self._underlying_scale_matrix.n_params:] = self._get_dynamic_params()
+        n = self._cov_api.n_params
+        params[:n] = self._cov_api.get_params()
+        params[n.n_params:] = self._get_dynamic_params()
         return params
 
     @property
     def _n_params(self) -> int:
-        return self.n_dynamic_params + self._underlying_scale_matrix.n_params
+        return self.n_dynamic_params + self._cov_api.n_params
 
     @property
     @abstractmethod
