@@ -5,7 +5,7 @@ from functools import cached_property  # wraps
 from enum import Enum, auto
 
 import numpy as np
-from scipy.linalg import block_diag, solve_triangular, solve_discrete_are
+from scipy.linalg import block_diag, solve_triangular
 from scipy.optimize import minimize
 
 from optimization_objectives import OptimizationObjective, GaussianNLL
@@ -693,15 +693,15 @@ class LinearStateSpaceModel(CompositeModel):
     def __init__(self,
                  linear_state_process: "LinearStateProcess",
                  exposures: ConstrainedMatrix,
-                 constant: Optional[ConstrainedMatrix] = None,
-                 measurement_noise_std: Optional[ConstrainedMatrix]= None):
+                 constant: ConstrainedMatrix,
+                 measurement_noise_constrain: Literal["free", "zero", "diagonal"]):
 
         super().__init__((None, 1), )
 
         self._state_process = linear_state_process
         self._exposures_signal = exposures
-        self._constant_signal = constant if constant is not None else ZeroMatrix((None, 1))
-        self._measurement_noise_signal = measurement_noise_std if measurement_noise_std is not None else ZeroMatrix((None, None))
+        self._constant_signal = constant
+        self._measurement_noise_signal = ConstrainedCovarianceAPI(shape=(None, None), constrain=measurement_noise_constrain)
 
         self._check_shapes()
 
@@ -710,9 +710,6 @@ class LinearStateSpaceModel(CompositeModel):
                                                     P0=None,
                                                     P_star=None,
                                                     P_infty=None)
-
-        for m in [self._exposures_signal, self._constant_signal, self._measurement_noise_signal]:
-            self.shape = (m.shape[0], 1)
 
 
     def _check_shapes(self):
@@ -736,17 +733,25 @@ class LinearStateSpaceModel(CompositeModel):
 
             return non_none_values[0]
 
-        process_shape = require_equal_or_none([self.state_process.shape[0], self._exposures_signal.shape[1]], True)
+        process_shape = require_equal_or_none([self._state_process.shape[0], self._exposures_signal.shape[1]], True)
         self._exposures_signal.shape = (None, process_shape)
+        self._state_process.shape = (process_shape, None)
+
+        this_shape = require_equal_or_none([self._constant_signal.shape[0],
+                                            self._exposures_signal.shape[0],
+                                            self._measurement_noise_signal.shape[0],
+                                            self._measurement_noise_signal.shape[1]
+                                            ], False)
+
+        if this_shape is not None:
+            self._constant_signal.shape = (this_shape, 1)
+            self._exposures_signal.shape = (this_shape, None)
+            self._measurement_noise_signal.shape = (this_shape, this_shape)
+            self.shape = (this_shape, 1)
 
     @property
     def _underlying_signals(self) -> list[Signal]:
-        signals = [self.state_process, self._exposures_signal]
-        if self.constant is not None:
-            signals.append(self._constant_signal)
-        if self.measurement_noise_std is not None:
-            signals.append(self._measurement_noise_signal)
-        return signals
+        return [self._state_process, self._exposures_signal, self._constant_signal, self._measurement_noise_signal]
 
     @property
     def state_process(self) -> "LinearStateProcess":
@@ -770,11 +775,19 @@ class LinearStateSpaceModel(CompositeModel):
 
     @property
     def measurement_noise_std(self) -> np.ndarray:
-        return self._measurement_noise_signal.matrix
+        return self._measurement_noise_signal.std
 
     @measurement_noise_std.setter
     def measurement_noise_std(self, value) -> None:
-        self._measurement_noise_signal.matrix = value
+        self._measurement_noise_signal.set_std(value)
+
+    @property
+    def measurement_noise_cov(self) -> np.ndarray:
+        return self._measurement_noise_signal.cov
+
+    @measurement_noise_cov.setter
+    def measurement_noise_cov(self, value) -> None:
+        self._measurement_noise_signal.set_cov(value)
 
     @check_is_defined
     def representation(self, *args, **kwargs) -> LinearStateSpaceModelRepresentation:
