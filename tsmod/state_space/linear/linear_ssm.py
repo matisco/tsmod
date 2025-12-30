@@ -736,6 +736,9 @@ class LinearStateSpaceModel(CompositeModel):
             if len(set(non_none_values)) > 1:
                 raise ValueError("Incompatible shapes in StateSpaceModel")
 
+            if not len(non_none_values):
+                return None
+
             return non_none_values[0]
 
         process_shape = require_equal_or_none([self._state_process.shape[0], self._exposures_signal.shape[1]], True)
