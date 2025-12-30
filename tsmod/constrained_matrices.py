@@ -2,7 +2,7 @@
 from enum import Enum
 import numpy as np
 from abc import ABC, abstractmethod
-# from functools import cached_property
+from functools import cached_property
 from typing import Literal
 from scipy.linalg import expm, logm
 import inspect
@@ -715,12 +715,64 @@ class UnitTopRowConstrained(ConstrainedMatrix):
         n, m = self.shape
         return (n - 1) * m
 
+    @cached_property
+    def _jacobian_mask(self):
+        size = self.shape[0] * self.shape[1]
+        mask = np.ones(size, dtype=bool)
+        mask[np.arange(0, size, self.shape[0])] = False
+        return mask
+
     def _jacobian_vecF_params(self):
         size = self.shape[0] * self.shape[1]
         j = np.eye(size)
-        arr = np.ones((size,), dtype=bool)
-        arr[np.arange(0, size, self.shape[0])] = False
-        return j[:, arr]
+        return j[:, self._jacobian_mask]
+
+
+class ElementWiseConstrainedMatrix(ConstrainedMatrix):
+    _enforce_square = False
+    _is_elementwise = True
+
+    def __init__(self, shape: tuple, constraints: dict[tuple[int, int], float]):
+        super().__init__(shape)
+        self._constraints = constraints
+
+    @cached_property
+    def _vecF_constrained_indexes(self) -> np.ndarray:
+        return np.array([self.shape[0] * j + i for i, j in self._constraints.keys()], dtype=int)
+
+    def _check_matrix_constrain(self, matrix):
+        for key, value in self._constraints.items():
+            if matrix[key] != value:
+                raise ValueError("Matrix does not meet constraint")
+
+    @property
+    def _n_params(self) -> int:
+        return self.shape[0] * self.shape[1] - len(self._constraints)
+
+    @cached_property
+    def _unconstrained_mask(self) -> np.ndarray:
+        mask = np.ones(self.shape[0] * self.shape[1], dtype=bool)
+        mask[self._vecF_constrained_indexes] = False
+        return mask
+
+    def _update_params(self, params) -> None:
+        if self.matrix is None:
+            matrix = np.zeros(self.shape)
+            for key, value in self._constraints.items():
+                matrix[key] = value
+            self.matrix = matrix
+
+        flat_matrix = self._matrix.ravel(order='F')
+        flat_matrix[self._unconstrained_mask] = params
+        self._matrix[:, :] = flat_matrix.reshape(self.shape, order='F')
+
+    def _get_params(self) -> np.ndarray:
+        return self.matrix.flatten(order='F')[self._unconstrained_mask]
+
+    def _jacobian_vecF_params(self):
+        j_free = np.eye(self.shape[0] * self.shape[1])
+        return np.delete(j_free, self._vecF_constrained_indexes, axis=1)
+
 
 # -----------
 # Diagonal
@@ -1879,48 +1931,88 @@ if __name__ == "__main__":
         return randos
 
 
-    shape0 = (3, 3)
-    randoms0 = get_randos(*shape0)
 
-    shape1 = (3, 3)
-    randoms1 = get_randos(*shape1)
+    shape = (10, 5)
+    constraints = {(0,0): 1, (0, 2): 0, (1, 2): 1}
+    exposures = ElementWiseConstrainedMatrix(shape, constraints)
 
-    matrix_options = [FreeMatrix, UnitTopRowConstrained, DiagonalMatrix, PosDiagonalMatrix, ZeroMatrix, IdentityMatrix,
-                      LowerTriangularMatrix, UnitLowerTriMatrix, ZeroLowerTriMatrix, PosDiagLowerTriMatrix,
-                      SymmetricMatrix, UnitDiagSymmetricMatrix, SkewSymmetricMatrix, SOMatrix,
-                      CovMatrix, CorrMatrix]
+    exposure0 = get_randos(*shape)[0]
+    for key, value in constraints.items():
+        exposure0[key] = value
 
+    exposures.matrix = exposure0
 
-    i = len(matrix_options) - 1
+    jac1 = exposures.jacobian_vec_params(order='F')
+    jac2 = exposures.numerical_jacobian_vec_params(order='F')
 
-    print((matrix_options[i]))
-
-    mat0 = CorrMatrix(shape0, parameterization='hyperspherical')
-    mat0.set_matrix(randoms0[i])
-    mat1 = CorrMatrix(shape0, parameterization='log')
-    mat1.set_matrix(randoms0[i])
+    if not np.allclose(jac1, jac2):
+        print(jac1, jac2)
+        raise ValueError("hello")
 
     rep_random = 1000
     start_time = time.time()
     for _ in range(rep_random):
-        new_params = np.random.rand(mat0.n_params)
-        mat1.update_params(new_params)
-        jac = mat1.jacobian_vec_params(order='F')
+        new_params = np.random.rand(exposures.n_params)
+        exposures.update_params(new_params)
+        jac = exposures.jacobian_vec_params(order='F')
     end_time = time.time()
     print(f"Elapsed time: {end_time - start_time}")
-
-    print(jac)
 
     rep_random = 1000
     start_time = time.time()
     for _ in range(rep_random):
-        new_params = np.random.rand(mat0.n_params)
-        mat0.update_params(new_params)
-        jac = mat0.jacobian_vec_params(order='F')
+        new_params = np.random.rand(exposures.n_params)
+        exposures.update_params(new_params)
+        jac = exposures.numerical_jacobian_vec_params(order='F')
     end_time = time.time()
     print(f"Elapsed time: {end_time - start_time}")
 
-    print(jac)
+
+
+
+
+    # shape0 = (3, 3)
+    # randoms0 = get_randos(*shape0)
+    #
+    # shape1 = (3, 3)
+    # randoms1 = get_randos(*shape1)
+    #
+    # matrix_options = [FreeMatrix, UnitTopRowConstrained, DiagonalMatrix, PosDiagonalMatrix, ZeroMatrix, IdentityMatrix,
+    #                   LowerTriangularMatrix, UnitLowerTriMatrix, ZeroLowerTriMatrix, PosDiagLowerTriMatrix,
+    #                   SymmetricMatrix, UnitDiagSymmetricMatrix, SkewSymmetricMatrix, SOMatrix,
+    #                   CovMatrix, CorrMatrix]
+    #
+    #
+    # i = len(matrix_options) - 1
+    #
+    # print((matrix_options[i]))
+    #
+    # mat0 = CorrMatrix(shape0, parameterization='hyperspherical')
+    # mat0.set_matrix(randoms0[i])
+    # mat1 = CorrMatrix(shape0, parameterization='log')
+    # mat1.set_matrix(randoms0[i])
+    #
+    # rep_random = 1000
+    # start_time = time.time()
+    # for _ in range(rep_random):
+    #     new_params = np.random.rand(mat0.n_params)
+    #     mat1.update_params(new_params)
+    #     jac = mat1.jacobian_vec_params(order='F')
+    # end_time = time.time()
+    # print(f"Elapsed time: {end_time - start_time}")
+    #
+    # print(jac)
+    #
+    # rep_random = 1000
+    # start_time = time.time()
+    # for _ in range(rep_random):
+    #     new_params = np.random.rand(mat0.n_params)
+    #     mat0.update_params(new_params)
+    #     jac = mat0.jacobian_vec_params(order='F')
+    # end_time = time.time()
+    # print(f"Elapsed time: {end_time - start_time}")
+    #
+    # print(jac)
 
     # print(mat_comb.jacobian_vec_params())
 

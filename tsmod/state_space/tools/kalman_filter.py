@@ -13,13 +13,14 @@ from numba import njit
 
 from optimization_objectives import OptimizationObjective, GaussianNLL
 
+from state_space.linear.representation import MutableLinearStateSpaceModelRepresentation, LinearStateSpaceModelRepresentation
 
 # This kalman filter does not incorporate with the base.py defined for tsmod
 # It is instead seen as an estimation tool, a calculator if you will.
 # The class StateSpaceModel uses the KalmanFilter for estimation, and incorporates with base.py
 
 
-# NOTE: The mere existence of this file is a bit stupid because there are many kalman filter implementations
+# NOTE: The mere existence of this file is a bit silly because there are many kalman filter implementations
 #       Take statsmodels.tsa.statespace.kalman_filter.KalmanFilter for instance
 #       Nevertheless, the reasons for these classes is:
 #           1. I want to use a steady state kalman filter even when the state is non-stationary, cause who cares
@@ -88,99 +89,7 @@ def kalman_pred_error_SS(demeaned_endog, F, Z, kalman_gain_SS, x0):
 
 
 @njit
-def steady_state_P_riccati(Z, H, F, Q, starter_P=None) -> np.ndarray:
-    """
-    Args:
-        Z: design matrix (m * k)
-        H: observation noise matrix (m * m)
-        F: transition matrix (k * k)
-        Q: state cov matrix (k * k)
-        starter_P: Optional (k * k) warm start matrix
-
-    Returns:
-        P_SS: steadystate state covariance matrix
-
-    """
-
-    if starter_P is not None:
-        P = starter_P
-    else:
-        P = Q.copy()
-
-    for i in range(10000):
-        # P_new = F @ P @ F.T + Q - F @ P @ H.T @ np.linalg.inv(H @ P @ H.T + R) @ H @ P @ F.T
-        B = Z @ P @ Z.T + H
-
-        FP = F @ P
-        FPZT = FP @ Z.T
-
-        P_new = FP @ F.T + Q - FPZT @ np.linalg.solve(B, FPZT.T)
-
-        if i % 10 == 0:
-            P = (P + P.T) / 2
-            P_new = (P_new + P_new.T) / 2
-            if np.allclose(P_new, P, atol=1e-6):
-                P = P_new
-                break
-        P = P_new
-
-    return P
-
-
-def steady_state_P_lyapunov(Z, H, F, Q, starter_P=None) -> np.ndarray:
-    """
-
-    Args:
-        Z: design matrix (m * k)
-        H: observation noise matrix (m * m)
-        F: transition matrix (k * k)
-        Q: state cov matrix (k * k)
-        starter_P: Optional (k * k) warm start matrix
-
-    Returns:
-        P_SS: steadystate state covariance matrix
-
-    """
-
-    if starter_P is not None:
-        P = starter_P
-    else:
-        P = Q.copy()
-
-    I = np.eye(F.shape[0] ** 2)
-
-    for i in range(1000):
-        S = Z @ P @ Z.T + H
-        pred_error_precision = np.linalg.inv(S)
-        K = P @ Z.T @ pred_error_precision
-
-        A_KC = F - K @ Z
-        vec_rhs = (K @ H @ K.T + Q).reshape(-1, 1)
-
-        # Solve linear system
-        vec_P = np.linalg.solve(I - np.kron(A_KC, A_KC), vec_rhs)
-        P_new = vec_P.reshape(F.shape)
-
-        if i % 10 == 0:
-            P = (P + P.T) / 2
-            P_new = (P_new + P_new.T) / 2
-            if np.allclose(P_new, P, atol=1e-6):
-                P = P_new
-                break
-        P = P_new
-
-    return P
-
-
-def steady_state_P_dare(Z, H, F, Q) -> np.ndarray:
-
-    P = solve_discrete_are(F.T, Z.T, Q, H)  # note the transpose for duality
-
-    return P
-
-
-@njit
-def kalman_filter_SS(y, mu, Z, H, F, x0, SS_params):
+def kalman_filter_SS(y, mu, Z, H, F, x0, steady_state_covariance, steady_state_kalman_gain, steady_state_obs_precision):
     T = y.shape[0]
     d = x0.shape[0]  # Dimension of state
     if y.ndim > 1:
@@ -189,7 +98,6 @@ def kalman_filter_SS(y, mu, Z, H, F, x0, SS_params):
         N = 1
 
     demeaned_endog = y - mu
-    P_SS, updated_P_SS, kalman_gain_SS, pred_error_precision = SS_params
 
     # Initialize arrays
     x_predicted = np.zeros((T, d))
@@ -199,15 +107,15 @@ def kalman_filter_SS(y, mu, Z, H, F, x0, SS_params):
 
     x_predicted[0] = F @ x0
     pred_error[0] = demeaned_endog[0] - Z @ x_predicted[0]
-    nll += pred_error[0].T @ pred_error_precision @ pred_error[0]
+    nll += pred_error[0].T @ steady_state_obs_precision @ pred_error[0]
     for t in range(1, T):
-        x_predicted[t] = F @ (x_predicted[t - 1] + kalman_gain_SS @ pred_error[t - 1])
+        x_predicted[t] = F @ (x_predicted[t - 1] + steady_state_kalman_gain @ pred_error[t - 1])
         pred_error[t] = demeaned_endog[t] - Z @ x_predicted[t]
-        nll += pred_error[t].T @ pred_error_precision @ pred_error[t]
+        nll += pred_error[t].T @ steady_state_obs_precision @ pred_error[t]
 
     nll = nll / 2
     nll_constant = np.log(2 * np.pi) * N
-    S = Z @ P_SS @ Z.T + H
+    S = Z @ steady_state_covariance @ Z.T + H
     _, logdet = np.linalg.slogdet(S)
     nll += (logdet + nll_constant) * T / 2
 
@@ -589,7 +497,6 @@ def _kalman_updater(predicted: "KalmanFilterResult"):  # TODO: not good atm. i d
 
     return x_updated, P_updated
 
-
 # def _is_stationary(A, C, Q, R, tol=1e-8):
 #     """
 #     Checks if a discrete-time system is stationary for steady-state Kalman filtering.
@@ -768,53 +675,6 @@ def calc_Q(Aj, Bj, Cj, Dj, Ej, Fj, Z, H, F, Q, T):
     return sum1 - (T / 2) * np.log(np.linalg.det(H)) + sum2
 
 
-class FrozenKalmanFilterRepresentation:
-
-    def __init__(self, const, E, L, M, F, R):
-        self._const = const
-        self._E = E
-        self._L = L
-        self._M = M
-        self._F = F
-        self._R = R
-
-    @property
-    def const(self):
-        return self._const
-
-    @property
-    def E(self):
-        return self._E
-
-    @property
-    def L(self):
-        return self._L
-
-    @property
-    def M(self):
-        return self._M
-
-    @property
-    def F(self):
-        return self._F
-
-    @property
-    def R(self):
-        return self._R
-
-    @property
-    def Z(self):
-        return self.E @ self.M
-
-    @property
-    def Q(self):
-        return self.R @ self.R.T
-
-    @property
-    def H(self):
-        return self.L @ self.L.T
-
-
 class KalmanFilterInitialization:
 
     _initialization_type_map = {"ss": "ss",
@@ -981,7 +841,7 @@ class KalmanFilterResult(KalmanFilterInSamplePrediction):
 
     def __init__(self,
                  series: np.ndarray,
-                 representation: FrozenKalmanFilterRepresentation,
+                 representation: LinearStateSpaceModelRepresentation,
                  initialization: KalmanFilterInitialization,
                  prediction_errors: np.ndarray,
                  predicted_state: np.ndarray,
@@ -1295,7 +1155,7 @@ class KalmanFilter:
 
     y_t = mu + Z x_t + e_t,  e_t ~ N(0, H)
 
-    x_{t+1} = F x_t + R u_t,  u_t ~ N(0, I)
+    x_{t+1} = F x_t + R u_t,  u_t ~ N(0, Q)
 
     """
 
@@ -1306,23 +1166,11 @@ class KalmanFilter:
 
     def __init__(self):
         self._endog = None
-        self._obs_dim = None
 
-        self._mu = None
+        self._mutable_representation: Optional[MutableLinearStateSpaceModelRepresentation] = None
 
-        self._Z, self._H, self._F, self._Q = None, None, None, None
-        self._L, self._R = None, None
-        self._E, self._M = None, None
-        self._state_dim = None
+        self._initialization: Optional[KalmanFilterInitialization] = None
 
-        self._is_initialized = False
-        self._initialization_type = None
-        self._x0 = None
-        self._P0 = None
-        self._P_star = None
-        self._P_infty = None
-
-        self._steady_state_params = (None, None, None, None)
         self._steady_state_calculation = "dare"
 
     @property
@@ -1353,101 +1201,49 @@ class KalmanFilter:
         return self
 
     @property
-    def mu(self):
-        return self._mu
+    def representation(self) -> LinearStateSpaceModelRepresentation:
+        if self._mutable_representation is None:
+            raise RuntimeError("Representation has not been set.")
+        return self._mutable_representation.get_frozen()
 
-    @mu.setter
-    def mu(self, mu):
-        self._check_mu(mu)
-        self._mu = mu
+    @representation.setter
+    def representation(self, representation: LinearStateSpaceModelRepresentation):
+        self._representation_setter(representation, True)
 
-    def set_mu(self, mu):
-        self.mu = mu
+    def set_representation(self, representation: LinearStateSpaceModelRepresentation):
+        self.representation = representation
         return self
 
-    def _check_mu(self, mu):
-        if not isinstance(mu, np.ndarray):
-            raise ValueError("mu must be either None or a np.ndarray or a real")
-
-        if mu.ndim > 1:
-            if mu.shape[1] != 1:
-                raise ValueError("mu must be 1D")
-            else:
-                mu = mu[:, 0]
-
-        if self._obs_dim is not None:
-            if mu.size != self._obs_dim:
-                raise ValueError(f"Dimension mismatch: mu has length {mu.size}, expected {self._obs_dim}")
-
-    def get_representation(self):
-        return FrozenKalmanFilterRepresentation(self._mu, self._E, self._L, self._M, self._F, self._R)
-
-    def set_matrices(self, M: Optional[np.ndarray], F: np.ndarray, R: np.ndarray,  E: np.ndarray, L: np.ndarray):
-        matrices = [F, R, E, L]
-        # Check that all are None or all are np.ndarray
-        if not all(isinstance(m, np.ndarray) for m in matrices):
-            raise ValueError("All inputs must be np.ndarray")
-
-        self._F, self._R = F, R
-
-        self._Q = R @ R.T
-
-        self._H = L @ L.T
-        self._L = L
-
-        if M is None:
-            M = np.eye(self._F.shape[0])
-        self._Z = E @ M
-        self._E = E
-        self._M = M
-
-        # self._Z.setflags(write=False)
-        # self._H.setflags(write=False)
-        # self._F.setflags(write=False)
-        # self._Q.setflags(write=False)
-        #
-        # self._M.setflags(write=False)
-        # self._E.setflags(write=False)
-        # self._R.setflags(write=False)
-        # self._L.setflags(write=False)
-
+    def set_representation_trusted(self, representation: LinearStateSpaceModelRepresentation):
+        self._representation_setter(representation, False)
         return self
 
-    def set_representation(self, representation: FrozenKalmanFilterRepresentation):
-        M, F, R, E, L = representation.M, representation.F, representation.R, representation.E, representation.L
-        self.mu = representation.const
-        return self.set_matrices(M, F, R, E, L)
+    def _representation_setter(self,
+                               representation: LinearStateSpaceModelRepresentation,
+                               validate: bool = True):
 
-    def initialize(self,
-                   initialization_type: Literal[
-                       "ss", "steady_state", "steadystate", "exact_diffuse", "exactdiffuse", "ed", "specified", "s"],
-                   x0: np.ndarray,
-                   P0: Optional[np.ndarray] = None,
-                   P_star: Optional[np.ndarray] = None,
-                   P_infty: Optional[np.ndarray] = None):
+        if self._mutable_representation is None:
+            self._mutable_representation = MutableLinearStateSpaceModelRepresentation.from_frozen(representation, validate)
+        else:
+            self._mutable_representation.update_representation(representation, validate)
 
-        kf_init = KalmanFilterInitialization(initialization_type, x0, P0, P_star, P_infty)
-        self._is_initialized = True
-        self._initialization_type = kf_init.type
-        self._x0 = x0
-        self._P0 = P0
-        self._P_star = P_star
-        self._P_infty = P_infty
+        self._mutable_representation.steady_state_calculation_method = self.steady_state_calculation
+
+    @property
+    def initialization(self):
+        return self._initialization
+
+    @initialization.setter
+    def initialization(self, initialization: KalmanFilterInitialization):
+        self._initialization = initialization
 
     def set_initialization(self, initialization: KalmanFilterInitialization):
-        self.initialize(initialization_type=initialization.type,
-                        x0=initialization.x0,
-                        P0=initialization.P0,
-                        P_star=initialization.P_star,
-                        P_infty=initialization.P_infty)
+        self.initialization = initialization
         return self
 
     def filter(self):
         pred_errors, x_predicted, P_predicted, nll, ZTSinv = self._calc_filtered()
-
-        representation = FrozenKalmanFilterRepresentation(self._mu, self._E, self._L, self._M, self._F, self._R)
-        initialization = KalmanFilterInitialization(self._initialization_type, self._x0, self._P0, self._P_star, self._P_infty)
-        res = KalmanFilterResult(self.endog, representation, initialization,
+        res = KalmanFilterResult(self.endog, self.representation, self.initialization,
                                  pred_errors, x_predicted, P_predicted, nll, ZTSinv)
 
         return res
@@ -1455,25 +1251,33 @@ class KalmanFilter:
     def _calc_filtered(self):
 
         self._check_properly_defined()
-        if self._initialization_type == "ss":
-            self._steady_state_params = self._calc_SS_params()
+
+        endog = self.endog
+        rep = self.representation
+        const, Z, H, F, RQRT = rep.const, rep.E @ rep.M, rep.H, rep.F, rep.RQRT
+
+        x0 = self.initialization.x0
+
+        if self.initialization.type == "ss":
+            ss_cov = self.representation.steady_state_covariance
+            ss_kg = self.representation.steady_state_kalman_gain
+            ss_obs_prec = self.representation.steady_state_observation_precision
 
             nll, pred_errors, x_predicted = \
-                kalman_filter_SS(self.endog, self.mu, self._Z, self._H, self._F, self._x0, self._steady_state_params)
+                kalman_filter_SS(endog, const, Z, H, F, x0, ss_cov, ss_kg, ss_obs_prec)
 
-            P_SS, _, _, pred_error_precision = self._steady_state_params
-            P_predicted = SteadyStateArray(P_SS, self.endog.shape[0])
-            ZTSinv = SteadyStateArray(self._Z.T @ pred_error_precision, self.endog.shape[0])
+            P_predicted = SteadyStateArray(ss_cov, self.endog.shape[0])
+            ZTSinv = SteadyStateArray(Z.T @ ss_obs_prec, self.endog.shape[0])
 
-        elif self._initialization_type == "s":
+        elif self.initialization.type == "s":
             nll, pred_errors, x_predicted, P_predicted, ZTSinv = \
-                kalman_filter(self.endog, self.mu, self._Z, self._H, self._F, self._Q, self._x0, self._P0)
+                kalman_filter(endog, const, Z, H, F, RQRT, x0, self.initialization.P0)
 
-        elif self._initialization_type == "ed":
+        elif self.initialization.type == "ed":
 
             nll, pred_errors, x_predicted, P_predicted, ZTSinv = \
-                kalman_filter_exact_diffuse(self.endog, self.mu, self._Z, self._H, self._F, self._Q, self._x0,
-                                            self._P_star, self._P_infty)
+                kalman_filter_exact_diffuse(endog, const, Z, H, F, RQRT, x0,
+                                            self.initialization.P_star, self.initialization.P_infty)
 
         else:
             raise ValueError("Error initializing kalman filter. Check inputs")
@@ -1483,19 +1287,29 @@ class KalmanFilter:
     def nll(self):
 
         self._check_properly_defined()
-        if self._initialization_type == "ss":
-            self._steady_state_params = self._calc_SS_params()  # P_SS, updated_P_SS, kalman_gain_SS, innovation_precision
-            nll = kalman_nll_SS(self.endog - self.mu, self._F, self._Z, self._H, self._steady_state_params[2],
-                                self._steady_state_params[3], self._steady_state_params[0], self._x0)
 
-        elif self._initialization_type == "s":
-            nll, _, _, _, _ = \
-                kalman_filter(self.endog, self.mu, self._Z, self._H, self._F, self._Q, self._x0, self._P0)
+        endog = self.endog
+        rep = self.representation
+        const, Z, H, F, RQRT = rep.const, rep.E @ rep.M, rep.H, rep.F, rep.RQRT
 
-        elif self._initialization_type == "ed":
+        x0 = self.initialization.x0
+
+        if self.initialization.type == "ss":
+            ss_cov = self.representation.steady_state_covariance
+            ss_kg = self.representation.steady_state_kalman_gain
+            ss_obs_prec = self.representation.steady_state_observation_precision
+
+            nll = kalman_nll_SS(endog - const, F, Z, H,
+                                ss_kg, ss_obs_prec, ss_cov, x0)
+
+        elif self.initialization.type == "s":
             nll, _, _, _, _ = \
-                kalman_filter_exact_diffuse(self.endog, self.mu, self._Z, self._H, self._F, self._Q, self._x0,
-                                            self._P_star, self._P_infty)
+                kalman_filter(endog, const, Z, H, F, RQRT, x0, self.initialization.P0)
+
+        elif self.initialization.type == "ed":
+            nll, _, _, _, _ = \
+                kalman_filter_exact_diffuse(endog, const, Z, H, F, RQRT, x0,
+                                            self.initialization.P_star, self.initialization.P_infty)
 
         else:
             raise ValueError("Error initializing kalman filter. Check inputs")
@@ -1524,20 +1338,26 @@ class KalmanFilter:
 
     def get_prediction_error(self):
         self._check_properly_defined()
-        if self._initialization_type == "ss":
-            self._steady_state_params = self._calc_SS_params()  # P_SS, updated_P_SS, kalman_gain_SS, innovation_precision
-            pred_error = kalman_pred_error_SS(self.endog - self.mu, self._F, self._Z, self._H,
-                                              self._steady_state_params[2],
-                                              self._steady_state_params[3], self._steady_state_params[0], self._x0)
 
-        elif self._initialization_type == "s":
+        endog = self.endog
+        rep = self.representation
+        const, Z, H, F, RQRT = rep.const, rep.E @ rep.M, rep.H, rep.F, rep.RQRT
+
+        x0 = self.initialization.x0
+
+        if self.initialization.type == "ss":
+            ss_kg = self.representation.steady_state_kalman_gain
+
+            pred_error = kalman_pred_error_SS(endog - const, F, Z, ss_kg, x0)
+
+        elif self.initialization.type == "s":
             _, pred_error, _, _, _ = \
-                kalman_filter(self.endog, self.mu, self._Z, self._H, self._F, self._Q, self._x0, self._P0)
+                kalman_filter(endog, const, Z, H, F, RQRT, x0, self.initialization.P0)
 
-        elif self._initialization_type == "ed":
+        elif self.initialization.type == "ed":
             _, pred_error, _, _, _, _ = \
-                kalman_filter_exact_diffuse(self.endog, self.mu, self._Z, self._H, self._F, self._Q, self._x0,
-                                            self._P_star, self._P_infty)
+                kalman_filter_exact_diffuse(endog, const, Z, H, F, RQRT, x0,
+                                            self.initialization.P_star, self.initialization.P_infty)
 
         else:
             raise ValueError("Error initializing kalman filter. Check inputs")
@@ -1570,16 +1390,13 @@ class KalmanFilter:
 
     def _check_properly_defined(self):
 
-        if not self._is_initialized:
+        if not isinstance(self.initialization, KalmanFilterInitialization):
             raise ValueError("kalman filter must be initialized before calling filter")
 
-        if not all(isinstance(m, np.ndarray) for m in [self._endog, self._Z, self._H, self._F, self._Q]):
-            raise ValueError("All matrices must be defined")
+        if not isinstance(self._mutable_representation, MutableLinearStateSpaceModelRepresentation):
+            raise ValueError("representation needs to be set before calling filter")
 
         self._check_dims()
-
-        if self.mu is None:
-            self.set_mu(mu=np.zeros(self._obs_dim, ))
 
     def _check_dims(self):
 
@@ -1588,15 +1405,17 @@ class KalmanFilter:
         else:
             n_obs_endog = 1
 
-        n_obs_mu = self.mu.size if self.mu is not None else n_obs_endog
-        n_obs_Z = self._Z.shape[0]
-        n_obs_H1 = self._H.shape[0]
-        n_obs_H2 = self._H.shape[1]
+        n_obs_mu = self._mutable_representation.const.size
+        Z = self._mutable_representation.E @ self._mutable_representation.M
 
-        n_state_Z = self._Z.shape[1]
-        n_state_F1 = self._F.shape[0]
-        n_state_F2 = self._F.shape[1]
-        n_state_R = self._R.shape[0]
+        n_obs_Z = Z.shape[0]
+        n_obs_H1 = self._mutable_representation.H.shape[0]
+        n_obs_H2 = self._mutable_representation.H.shape[1]
+
+        n_state_Z = Z.shape[1]
+        n_state_F1 = self._mutable_representation.F.shape[0]
+        n_state_F2 = self._mutable_representation.F.shape[1]
+        n_state_R = self._mutable_representation.R.shape[0]
 
         all_obs = [n_obs_endog, n_obs_mu, n_obs_Z, n_obs_H1, n_obs_H2]
         if len(set(all_obs)) > 1:
@@ -1606,36 +1425,7 @@ class KalmanFilter:
         if len(set(all_state)) > 1:
             raise ValueError("Dimension miss match: State side")
 
-        self._obs_dim = n_obs_mu
-        self._state_dim = n_state_Z
-
-    def _calc_SS_params(self):
-
-        d = self._Z.shape[1]  # Dimension of state
-        Z, H, F, Q = self._Z, self._H, self._F, self._Q
-
-
-        if self.steady_state_calculation == "riccati":
-            P_SS = steady_state_P_riccati(Z, H, F, Q, self._steady_state_params[0])
-        elif self.steady_state_calculation == "lyapunov":
-            P_SS = steady_state_P_lyapunov(Z, H, F, Q, self._steady_state_params[0])
-        elif self.steady_state_calculation == "dare":
-            P_SS = steady_state_P_dare(Z, H, F, Q)
-        else:
-            raise ValueError("Error initializing kalman filter. Check steady state calculation method")
-
-        S = Z @ P_SS @ Z.T + H
-        # _, logdet = np.linalg.slogdet(S)
-        innovation_precision = np.linalg.inv(S)
-        kalman_gain_SS = P_SS @ Z.T @ innovation_precision
-
-        I_d = np.eye(d)
-        updated_P_SS = (I_d - kalman_gain_SS @ Z) @ P_SS
-        updated_P_SS = (updated_P_SS + updated_P_SS.T) / 2
-
-        return P_SS, updated_P_SS, kalman_gain_SS, innovation_precision
-
-    def get_em_matrices(self):
+    def get_em_matrices(self, burn: int = 10):
         self._check_properly_defined()
 
         pred_errors, x_predicted, predicted_state_cov, nll, ZTinvS = self._calc_filtered()
@@ -1649,6 +1439,8 @@ class KalmanFilter:
         elif isinstance(predicted_state_cov, PowerExpansionArray):
             predicted_state_cov = predicted_state_cov.base_matrices
 
-        x_smooth, P_smooth, Plag_smooth = kalman_smoother(self._Z, self._F, pred_errors, x_predicted, predicted_state_cov, ZTinvS)
+        Z, F = self.representation.E @ self.representation.M, self.representation.F
 
-        return calc_EM_matrices(self.endog, self.mu, x_smooth, P_smooth, Plag_smooth, burn=10)
+        x_smooth, P_smooth, Plag_smooth = kalman_smoother(Z, F, pred_errors, x_predicted, predicted_state_cov, ZTinvS)
+
+        return calc_EM_matrices(self.endog, self.representation.const, x_smooth, P_smooth, Plag_smooth, burn=burn)

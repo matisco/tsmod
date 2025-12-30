@@ -336,8 +336,7 @@ def check_is_defined(func):
     @wraps(func)
     def wrapper(self, *args, **kwargs):
         if not self.is_defined:
-            warnings.warn("Signal not properly defined", UserWarning)
-            return None
+            raise RuntimeError(f"Signal not defined, cannot call {func.__name__}")
         return func(self, *args, **kwargs)
     return wrapper
 

@@ -2,14 +2,14 @@ from dataclasses import dataclass
 from abc import ABC, abstractmethod
 from typing import Optional, Union, Any, Literal
 from functools import cached_property  # wraps
+from enum import Enum, auto
 
 import numpy as np
-from scipy.linalg import block_diag
+from scipy.linalg import block_diag, solve_triangular, solve_discrete_are
 from scipy.optimize import minimize
-from scipy.linalg import solve_triangular
 
 from optimization_objectives import OptimizationObjective, GaussianNLL
-# from deterministic import DeterministicProcess, DeterministicModel
+
 from constrained_matrices import (ConstrainedMatrix,
                                   UnitTopRowConstrained as UnitTopRowMatrix,
                                   FreeMatrix,
@@ -18,24 +18,26 @@ from constrained_matrices import (ConstrainedMatrix,
                                   DiagonalMatrix,
                                   ZeroMatrix,
                                   STDMatrix,
-                                  CorrMatrix)
+                                  CorrMatrix,
+                                  ElementWiseConstrainedMatrix)
 
 
-from tsmod.base import Signal, Model, ModelFit, CompositeSignal, CompositeModel, check_is_defined
+from base import Signal, Model, ModelFit, CompositeSignal, CompositeModel, check_is_defined
 from base import ForecastResult, DeterministicForecastResult, NormalForecastResult
+from tools.utils import validate_covariance, validate_chol_factor
 from state_space.tools.kalman_filter import (KalmanFilter,
                                              KalmanFilterResult,
                                              KalmanFilterInitialization)
+
+from representation import LinearStateSpaceModelRepresentation, LinearStateProcessRepresentation
+
 from utils import numerical_jacobian
 
-#
-# TODO: HIGH PRIORITY
-#       1. Add scale to the processes instead of forcing Q = I. I'm not liking this approach anymore,
-#               makes using composite model very unwieldy
-#
 
 # TODO: MEDIUM PRIORITY
 #       1. Add adaptive step to EM optimization (should take very little effort)
+#       2. the representation structure does nothing now. so the design is not super clear.
+#       3. Add Gauge Symmetries. Not using right now so I will skip for simplocity
 #
 
 # TODO: LOW PRIORITY
@@ -77,26 +79,6 @@ from utils import numerical_jacobian
 class LinearSSMUtils:
 
     @staticmethod
-    def validate_covariance(Q):
-        """Check that Q is a valid covariance matrix."""
-        if Q.shape[0] != Q.shape[1]:
-            raise ValueError("Covariance matrix Q must be square")
-        if not np.allclose(Q, Q.T):
-            raise ValueError("Covariance matrix Q must be symmetric")
-        # Check positive semi-definite
-        eigenvalues = np.linalg.eigvalsh(Q)
-        if np.any(eigenvalues < -1e-12):  # allow tiny numerical errors
-            raise ValueError("Covariance matrix Q must be positive semi-definite")
-
-    @staticmethod
-    def validate_chol_factor(LQ):
-        """Check that LQ is lower triangular with positive diagonal."""
-        if not np.allclose(LQ, np.tril(LQ)):
-            raise ValueError("LQ must be lower triangular")
-        if np.any(np.diag(LQ) <= 0):
-            raise ValueError("Diagonal entries of LQ must be positive")
-
-    @staticmethod
     def simulate_or_forecast(time_domain: Union[tuple[int, int], int],
                              latent_process: "LinearStateProcess",
                              exposures: Optional[np.ndarray] = None,
@@ -124,21 +106,22 @@ class LinearSSMUtils:
         # ---- Latent Process Representation and Simulation ----
         state_dim = latent_process.state_dim
 
-        M, F, R = latent_process.representation().params
+        rep = latent_process.representation()
+        M, F, RLQ = rep.M, rep.F, rep.R @ rep.LQ
 
         if initial_state is not None:
             latent_stochastic = np.zeros((T, state_dim))
             eta = np.random.randn(T, state_dim)
-            latent_stochastic[0] = F @ initial_state + R @ eta[0]
+            latent_stochastic[0] = F @ initial_state + RLQ @ eta[0]
             for t in range(1, T):
-                latent_stochastic[t] = F @ latent_stochastic[t - 1] + R @ eta[t]
+                latent_stochastic[t] = F @ latent_stochastic[t - 1] + RLQ @ eta[t]
             latent_stochastic = latent_stochastic @ M.T
         else:
             latent_stochastic = np.zeros((T + burn, state_dim))
             eta = np.random.randn(T + burn, state_dim)
             latent_stochastic[0] = eta[0]
             for t in range(1, T + burn):
-                latent_stochastic[t] = F @ latent_stochastic[t-1] + R @ eta[t]
+                latent_stochastic[t] = F @ latent_stochastic[t-1] + RLQ @ eta[t]
             latent_stochastic = latent_stochastic @ M.T
             latent_stochastic = latent_stochastic[burn:]
 
@@ -194,140 +177,25 @@ class LinearStateSpaceModelFit(ModelFit):
             return loss(self.get_prediction_errors())
 
 # ---------
-# StateSpace Representation Classes
-# ---------
-
-class LinearStateProcessRepresentation:
-
-    def __init__(self,M, F, R,
-                 LQ: Optional[np.ndarray] = None, Q: Optional[np.ndarray] = None,
-                 validate: bool = True):
-
-        self._M = M
-        self._F = F
-        self._R = R
-
-        if validate:
-            for m in [M, F, R]:
-                if not isinstance(m, np.ndarray):
-                    raise ValueError("M, F, R need to be a numpy arrays")
-            if LQ is not None:
-                LinearSSMUtils.validate_chol_factor(LQ)
-            if Q is not None:
-                LinearSSMUtils.validate_covariance(Q)
-
-            if (LQ is not None) and (Q is not None):
-                if not np.allclose(LQ @ LQ.T, Q):
-                    raise ValueError("LQ needs to be the Cholesky factor of Q")
-
-        self._Q = Q
-        self._LQ = LQ
-        if LQ is None and Q is None:
-            self._LQ = np.eye(R.shape[1])
-            self._Q = self._LQ
-
-    @property
-    def M(self):
-        return self._M
-
-    @property
-    def F(self):
-        return self._F
-
-    @property
-    def R(self):
-        return self._R
-
-    @property
-    def Q(self):
-        if self._Q is None:
-            self._Q = self._LQ @ self._LQ.T
-        return self._Q
-
-    @property
-    def LQ(self):
-        if self._LQ is None:
-            self._LQ = np.linalg.cholesky(self._Q)
-        return self._LQ
-
-    @property
-    def RQRT(self):
-        return self.R @ self.Q @ self.R.T
-
-    @property
-    def params(self):
-        return self.M, self.F, self.R
-
-
-class LinearStateSpaceModelRepresentation(LinearStateProcessRepresentation):
-
-    def __init__(self,
-                 E,
-                 M, F, R,
-                 const: Optional[np.ndarray] = None,
-                 LH: Optional[np.ndarray] = None, H: Optional[np.ndarray] = None,
-                 LQ: Optional[np.ndarray] = None, Q: Optional[np.ndarray] = None,
-                 validate: bool = True):
-
-        if LH is None and H is None:
-            raise ValueError("At least one of LH or H must be provided")
-
-        super().__init__(M, F, R, LQ, Q, validate)
-
-        if const is None:
-            const = np.zeros((E.shape[0],))
-
-        if validate:
-            for m in [const, E]:
-                if not isinstance(m, np.ndarray):
-                    raise ValueError("const, E need to be a numpy arrays")
-            if LH is not None:
-                LinearSSMUtils.validate_chol_factor(LH)
-            if H is not None:
-                LinearSSMUtils.validate_covariance(H)
-
-            if (LH is not None) and (H is not None):
-                if not np.allclose(LH @ LH.T, H):
-                    raise ValueError("LQ needs to be the Cholesky factor of Q")
-
-
-        self._const = const
-        self._E = E
-        self._LH = LH
-        self._H = H
-
-    @property
-    def const(self):
-        return self._const
-
-    @property
-    def E(self):
-        return self._E
-
-    @property
-    def H(self):
-        if self._H is None:
-            self._H = self._LH @ self._LH.T
-        return self._H
-
-    @property
-    def LH(self):
-        if self._LH is None:
-            self._LH = np.linalg.cholesky(self._H)
-        return self._LH
-
-    @property
-    def params(self):
-        return self.const, self.E, self.L, self.M, self.F, self.R
-
-# ---------
 # "Latent" process, and composite "latent" process
 # ---------
 
 @dataclass(frozen=True)
 class RotationalSymmetry:
-    block: tuple[int, ...]     # latent indices
-    reason: str | None = None
+    indices: tuple[int, ...]
+
+
+class StructuralVariability(Enum):
+    FIXED = auto()
+    PARAMETRIC = auto()
+    FREE = auto()
+
+
+@dataclass(frozen=True)
+class RepresentationStructure:
+    M: StructuralVariability
+    F: StructuralVariability
+    R: StructuralVariability
 
 
 class LinearStateProcess(Model, ABC):
@@ -374,14 +242,22 @@ class LinearStateProcess(Model, ABC):
     def __init__(self,
                  shape: tuple,
                  innovation_dim: int,
+                 scale_constrain: Literal["free", "identity", "diagonal", "correlation"],
                  advanced_options: Optional[AdvancedOptions] = None):
         super().__init__(shape)
 
         self._advanced_options = advanced_options or self.AdvancedOptions()
 
         self._innovation_dim = innovation_dim
-        self._scale_constrain = 'free'
-        self._underlying_scale_matrix = STDMatrix((self._innovation_dim, self._innovation_dim))
+        if not scale_constrain.lower() in self._scale_constrain_options:
+            raise ValueError(f"Invalid scale_constrain: {scale_constrain}")
+        self._scale_constrain = scale_constrain.lower()
+        self._underlying_scale_matrix = None
+        getattr(self, f'_constrain_scale_to_{scale_constrain}')()
+
+    @property
+    def advanced_options(self):
+        return self._advanced_options
 
     def set_advanced_option(self, name: str, value):
         """Set an advanced option by name."""
@@ -397,18 +273,6 @@ class LinearStateProcess(Model, ABC):
     @property
     def scale_constrain(self):
         return self._scale_constrain
-
-    @scale_constrain.setter
-    def scale_constrain(self, value):
-        if value not in self._scale_constrain_options:
-            raise ValueError("Scale constraint must be one of: free, identity, diagonal, correlation")
-
-        getattr(self, f'_constrain_scale_to_{value}')(self._scale_constrain)
-        self._scale_constrain = value
-
-    def set_scale_constrain(self, value):
-        self.scale_constrain = value
-        return self
 
     @property
     def std(self):
@@ -458,15 +322,15 @@ class LinearStateProcess(Model, ABC):
             "log": lambda: mat,
         }[self._advanced_options.correlation_parameterization]()
 
-    def _constrain_scale_to_identity(self, previous_scale_constraint):  # TODO: keep previous matrix values
+    def _constrain_scale_to_identity(self):
         self._underlying_scale_matrix = IdentityMatrix((self._innovation_dim, self._innovation_dim))
 
-    def _constrain_scale_to_diagonal(self, previous_scale_constraint):
-        current_std = self.std
+    def _constrain_scale_to_diagonal(self):
         self._underlying_scale_matrix = PosDiagonalMatrix((self._innovation_dim, self._innovation_dim))
 
     def _constrain_scale_to_correlation(self):
-        self._underlying_scale_matrix = CorrMatrix((self._innovation_dim, self._innovation_dim), parameterization="hyperspherical")  # TODO: support different parameterization
+        self._underlying_scale_matrix = CorrMatrix((self._innovation_dim, self._innovation_dim),
+                                                   parameterization=self._advanced_options.correlation_parameterization)
 
     def _constrain_scale_to_free(self):
         self._underlying_scale_matrix = STDMatrix((self._innovation_dim, self._innovation_dim))
@@ -485,9 +349,14 @@ class LinearStateProcess(Model, ABC):
     def is_dynamics_defined(self) -> bool:
         raise NotImplementedError
 
+    @cached_property
+    @abstractmethod
+    def representation_structure(self) -> RepresentationStructure:
+        raise NotImplementedError
+
     def _update_params(self, params: np.ndarray) -> None:
         self._underlying_scale_matrix.update_params(params[:self._underlying_scale_matrix.n_params])
-        self._update_params(params[self._underlying_scale_matrix.n_params:])
+        self._update_dynamic_params(params[self._underlying_scale_matrix.n_params:])
 
     def _get_params(self) -> np.ndarray:
         params = np.empty((self.n_params,))
@@ -520,8 +389,9 @@ class LinearStateProcess(Model, ABC):
         """
         raise NotImplementedError
 
+    @cached_property
     @abstractmethod
-    def _declare_rotational_symmetries(self) -> list[RotationalSymmetry]:
+    def rotational_symmetries(self) -> list[RotationalSymmetry]:
         """
         Declare continuous rotational invariances of the latent state.
 
@@ -548,6 +418,8 @@ class LinearStateProcess(Model, ABC):
             include_constant: bool = False,
             measurement_noise: Optional[Literal["zero", "diagonal", "full"]] = None) -> LinearStateSpaceModelFit:
 
+        # TODO: add estimation of factor models with to_identifiable_ssm
+
         n_series = series.shape[1]
 
         if n_series != self.shape[0]:
@@ -556,18 +428,22 @@ class LinearStateProcess(Model, ABC):
         if not self.is_defined:
             self._first_fit_to(series)
 
-        ssm = self._state_space_model(include_constant, measurement_noise)
+        ssm = self.get_identifiable_state_space_model(include_constant=include_constant,
+                                                      measurement_noise=measurement_noise)
 
         if include_constant:
             ssm.constant = np.mean(series).reshape(-1, 1)
+        else:
+            ssm.constant = np.zeros((n_series, 1))
 
-        ssm.measurement_noise_std.shape = (n_series, n_series)
         if measurement_noise == "diagonal":
             ssm.measurement_noise_std = np.diag(np.sqrt(np.std(series, axis=0) * 0.5))
-        if measurement_noise == "full":
+        elif measurement_noise == "full":
             ssm.measurement_noise_std = np.linalg.cholesky(np.cov(series) * 0.5)
+        elif measurement_noise == "zero":
+            ssm.measurement_noise_std = np.zeros((n_series, n_series))
 
-        ssm.exposures = np.eye(n_series)
+        ssm._exposures_signal = IdentityMatrix((n_series, n_series))
 
         return ssm.fit(series, objective)
 
@@ -588,59 +464,60 @@ class LinearStateProcess(Model, ABC):
         """
         raise NotImplementedError
 
-    def _build_state_space_model(self,
-                                 series,
-                                 include_constant: bool,
-                                 measurement_noise: Optional[Literal["zero", "diagonal", "full"]]) -> "LinearStateSpaceModel": # TODO
-        """
-        Can be overwritten.
 
-        needs to build a state space model of the form
+    def get_identifiable_state_space_model(self,
+                             include_constant: bool,
+                             measurement_noise: Optional[Literal["zero", "diagonal", "full"]]) -> "LinearStateSpaceModel":
 
-        y_t = E f_t + e_t, e_t ~ N(0,H) = LH N(0, I)
-        f_t = M x_t
-        x_t = F x_t-1 + R u_t , u_t ~ N(0,Q) = LQ N(0, I)
+        scale_map = {
+            'free': (False, False),
+            'identity': (True, False),
+            'diagonal': (False, True),
+            'correlation': (True, False)
+        }
 
-        see LinearStateSpaceModelRepresentation
+        try:
+            innovation_noise_fixed_scale, innovation_noise_fixed_rotation = scale_map[self._scale_constrain]
+        except KeyError:
+            raise NotImplementedError("unknown scale constraint")
 
-        Args:
-            series:
-            include_constant:
-            measurement_noise:
+        rot_symmetries = self._declare_and_enforce_disjoint_rotational_symmetry # returns a list of RotationalSymmetry objects, each if a tuple of indexe
 
-        Returns:
+        # Build exposure constraints
+        exposure_constraints = {}
 
-        """
+        # Constrain first row if scale is not fixed
+        if not innovation_noise_fixed_scale:
+            for j in range(self.shape[0]):
+                exposure_constraints[(0, j)] = 1
 
-        if series.shape[0] == self.shape[0]:
-            if not self.is_defined:
-                was_identity_flag = False
-                if self._scale_constrain == 'identity':
-                    was_identity_flag = True
-                    self.constrain_scale_to_diagonal()
+        # Apply rotational symmetry constraints
+        if not innovation_noise_fixed_rotation:
+            for rot_block in rot_symmetries:
+                for i, idx in enumerate(rot_block.indices):
+                    # Zero out entries above diagonal
+                    for j in range(i):
+                        exposure_constraints[(j, idx)] = 0
+                    # Set diagonal to 1 if scale is not fixed
+                    if not innovation_noise_fixed_scale:
+                        exposure_constraints[(i, idx)] = 1
 
-                self._first_fit_to(series)
+        exposures = (ElementWiseConstrainedMatrix((None, self.shape[0]), exposure_constraints)
+                     if len(exposure_constraints) else
+                     FreeMatrix((None, self.shape[0])))
 
-                if was_identity_flag:
-                    exposures = DiagonalMatrix((self.shape[0], self.shape[0]))
+        constant = FreeMatrix((None, 1)) if include_constant else ZeroMatrix((None, 1))
 
-                else:
-                    exposures = IdentityMatrix((self.shape[0], self.shape[0]))
+        measurement_noise_map = {
+            None: ZeroMatrix,
+            "zero": ZeroMatrix,
+            "diagonal": PosDiagonalMatrix,
+            "full": STDMatrix
+        }
 
-
-
-        if include_constant:
-            constant = FreeMatrix((None, 1))
-        else:
-            constant = ZeroMatrix((None, 1))
-
-        if measurement_noise == "zero" or measurement_noise is None:
-            measurement_noise = ZeroMatrix((None, None))
-        elif measurement_noise == "diagonal":
-            measurement_noise = PosDiagonalMatrix((None, None))
-        elif measurement_noise == "full":
-            measurement_noise = STDMatrix((None, None))
-        else:
+        try:
+            measurement_noise = measurement_noise_map[measurement_noise]((None, None))
+        except KeyError:
             raise ValueError("Unknown measurement noise")
 
         ssm = LinearStateSpaceModel(linear_state_process=self,
@@ -650,10 +527,44 @@ class LinearStateProcess(Model, ABC):
 
         return ssm
 
+    @cached_property
+    def _declare_and_enforce_disjoint_rotational_symmetry(self):
+        """
+        Checks that the rotational symmetry blocks declared in
+        `_declare_rotational_symmetries` are disjoint.
+
+        Raises:
+            ValueError: if any blocks overlap.
+        """
+        rotational_symmetries = self.rotational_symmetries
+
+        index_to_block = {}
+
+        for rot in rotational_symmetries:
+            for idx in rot.indices:
+                if idx in index_to_block:
+                    first_block = index_to_block[idx]
+                    raise ValueError(
+                        f"Index {idx} appears in multiple rotational symmetry blocks: "
+                        f"{first_block} and {rot.indices}. Blocks must be disjoint."
+                    )
+                index_to_block[idx] = rot.indices
+
+        return rotational_symmetries
+
+    def _build_state_space_model(self,
+                                 series,
+                                 include_constant: bool,
+                                 measurement_noise: Optional[Literal["zero", "diagonal", "full"]]) -> "LinearStateSpaceModel":
+
+        ssm = self.get_identifiable_state_space_model(include_constant, measurement_noise)
+
 
 class CompositeLinearStateProcess(CompositeModel, LinearStateProcess):
 
-    def __init__(self, processes: list[LinearStateProcess], mixing_matrix: np.ndarray):
+    def __init__(self,
+                 processes: list[LinearStateProcess],
+                 mixing_matrix: np.ndarray):
         self._underlying_processes = processes
         self._mixing_matrix = mixing_matrix
 
@@ -679,18 +590,48 @@ class CompositeLinearStateProcess(CompositeModel, LinearStateProcess):
         if not self._mixing_matrix.shape[1] == shape_of_underlying:
             raise ValueError("Shape missmatch. Mixing matrix with .")
 
-    def _declare_rotational_symmetries(self) -> list[RotationalSymmetry]: # TODO
-        pass
+    @cached_property
+    def rotational_symmetries(self) -> list[RotationalSymmetry]:
+        """
+        Generally needs to be overwritten.
+
+        Default joins the underlying rotational symmetries, correcting for the index shift
+
+        The default implementation propagates rotational symmetries from underlying latent processes by index shifting.
+        This captures all symmetries inherited from individual components.
+        Additional symmetries introduced or broken by mixing must be handled by overriding this method.
+        """
+        joint_rot_syms = []
+        latent_dim_shift = 0
+        for lsp in self._underlying_processes:
+            lsp_rot_syms = lsp.rotational_symmetries
+            for rot_sym in lsp_rot_syms:
+                indexes = tuple(i + latent_dim_shift for i in rot_sym.indices)
+                joint_rot_syms.append(RotationalSymmetry(indexes))
+            latent_dim_shift += lsp.state_dim
+
+        return joint_rot_syms
 
     @property
     def is_dynamics_defined(self) -> bool:
         return all(lsp.is_dynamics_defined for lsp in self._underlying_processes)
 
-    def _update_dynamic_params(self, params: np.ndarray): # TODO
-        pass
+    def _update_dynamic_params(self, params: np.ndarray):
+        idx_shift = 0
+        for lsp in self._underlying_processes:
+            n_par = lsp.n_dynamic_params
+            lsp._update_dynamic_params(params[idx_shift + n_par])
+            idx_shift += n_par
 
-    def _get_dynamic_params(self) -> np.ndarray:  # TODO
-        pass
+    def _get_dynamic_params(self) -> np.ndarray:
+        n_dyn_par = sum(lsp.n_dynamic_params for lsp in self._underlying_processes)
+        dyn_params = np.empty((n_dyn_par,))
+        idx_shift = 0
+        for lsp in self._underlying_processes:
+            n_par = lsp.n_dynamic_params
+            dyn_params[idx_shift:idx_shift + n_par] = lsp._get_dynamic_params()
+            idx_shift += n_par
+        return dyn_params
 
     @property
     def n_dynamic_params(self) -> int:
@@ -723,6 +664,25 @@ class CompositeLinearStateProcess(CompositeModel, LinearStateProcess):
         M = self.mixing_matrix @ block_diag([rep.M for rep in reps])
         return LinearStateProcessRepresentation(M, F, R)
 
+    def representation_structure(self) -> RepresentationStructure:
+        structs = [lp.representation_structure for lp in self._underlying_processes]
+
+        def composite_struc(structs, attribute):
+            if all(getattr(struct, attribute) == StructuralVariability.FIXED for struct in structs):
+                return StructuralVariability.FIXED
+            elif all(getattr(struct, attribute) == StructuralVariability.FREE for struct in structs):
+                return StructuralVariability.FREE
+            else:
+                return StructuralVariability.PARAMETRIC
+
+        res = RepresentationStructure(
+            M=composite_struc(structs, 'M'),
+            F=composite_struc(structs, 'F'),
+            R=composite_struc(structs, 'R'),
+        )
+
+        return res
+
     def _first_fit_to(self, series: np.ndarray):
         raise NotImplementedError(
             "This estimator was initialized with incomplete parameters. "
@@ -730,10 +690,25 @@ class CompositeLinearStateProcess(CompositeModel, LinearStateProcess):
             "auto-estimation."
         )
 
-# ---------
-# "Full" linear state space model
-# ---------
-
+# -----------------------------------------------------------------------------
+# LinearStateSpaceModel
+#
+# A LinearStateSpaceModel represents a LinearStateProcess after a linear
+# transformation A with additive noise e_t. That is, the process:
+#
+#     y_t = A x_t + e_t
+#
+# where x_t is a LinearStateProcess, A is a matrix, and e_t is additive noise.
+# This is a purely mathematical object and does not bind to data.
+#
+# The LinearStateProcess is the primary abstraction.
+# In typical usage, a LinearStateProcess constructs or returns an appropriate
+# LinearStateSpaceModel when a state-space (linear + noise) representation is
+# required, e.g. for filtering, smoothing, or likelihood evaluation.
+#
+# This class is rarely subclassed directly; new behavior should generally be
+# introduced by defining new LinearStateProcess classes instead.
+# -----------------------------------------------------------------------------
 class LinearStateSpaceModel(CompositeModel):
 
     def __init__(self,
@@ -741,12 +716,13 @@ class LinearStateSpaceModel(CompositeModel):
                  exposures: ConstrainedMatrix,
                  constant: Optional[ConstrainedMatrix] = None,
                  measurement_noise_std: Optional[ConstrainedMatrix]= None):
+
         super().__init__((None, 1), )
 
         self._state_process = linear_state_process
-        self._exposures = exposures
-        self._constant = constant if constant is not None else ZeroMatrix((None, 1))
-        self._measurement_noise_std = measurement_noise_std if measurement_noise_std is not None else ZeroMatrix((None, None))
+        self._exposures_signal = exposures
+        self._constant_signal = constant if constant is not None else ZeroMatrix((None, 1))
+        self._measurement_noise_signal = measurement_noise_std if measurement_noise_std is not None else ZeroMatrix((None, None))
 
         self._check_shapes()
 
@@ -756,7 +732,7 @@ class LinearStateSpaceModel(CompositeModel):
                                                     P_star=None,
                                                     P_infty=None)
 
-        for m in [self._exposures, self._constant, self._measurement_noise_std]:
+        for m in [self._exposures_signal, self._constant_signal, self._measurement_noise_signal]:
             self.shape = (m.shape[0], 1)
 
 
@@ -781,16 +757,16 @@ class LinearStateSpaceModel(CompositeModel):
 
             return non_none_values[0]
 
-        process_shape = require_equal_or_none([self.state_process.shape[0], self.exposures.shape[1]], True)
-        self.exposures.shape = (None, process_shape)
+        process_shape = require_equal_or_none([self.state_process.shape[0], self._exposures_signal.shape[1]], True)
+        self._exposures_signal.shape = (None, process_shape)
 
     @property
     def _underlying_signals(self) -> list[Signal]:
-        signals = [self.state_process, self.exposures]
+        signals = [self.state_process, self._exposures_signal]
         if self.constant is not None:
-            signals.append(self.constant)
+            signals.append(self._constant_signal)
         if self.measurement_noise_std is not None:
-            signals.append(self.measurement_noise_std)
+            signals.append(self._measurement_noise_signal)
         return signals
 
     @property
@@ -798,50 +774,44 @@ class LinearStateSpaceModel(CompositeModel):
         return self._state_process
 
     @property
-    def exposures(self) -> Optional[ConstrainedMatrix]:
-        return self._exposures
+    def exposures(self) -> np.ndarray:
+        return self._exposures_signal.matrix
 
     @exposures.setter
     def exposures(self, value) -> None:
-        if isinstance(value, ConstrainedMatrix):
-            self._exposures = value
-        elif isinstance(value, np.ndarray):
-            self._exposures.matrix = value
+        self._exposures_signal.matrix = value
 
     @property
-    def constant(self) -> Optional[ConstrainedMatrix]:
-        return self._constant
+    def constant(self) -> np.ndarray:
+        return self._constant_signal.matrix
 
     @constant.setter
     def constant(self, value) -> None:
-        if isinstance(value, ConstrainedMatrix):
-            self._constant = value
-        elif isinstance(value, np.ndarray):
-            self._constant.matrix = value
+        self._constant_signal.matrix = value
 
     @property
-    def measurement_noise_std(self) -> Optional[ConstrainedMatrix]:
-        return self._measurement_noise_std
+    def measurement_noise_std(self) -> np.ndarray:
+        return self._measurement_noise_signal.matrix
 
     @measurement_noise_std.setter
     def measurement_noise_std(self, value) -> None:
-        if isinstance(value, ConstrainedMatrix):
-            self.measurement_noise_std = value
-        elif isinstance(value, np.ndarray):
-            self._measurement_noise_std.matrix = value
+        self._measurement_noise_signal.matrix = value
 
+    @check_is_defined
     def representation(self, *args, **kwargs) -> LinearStateSpaceModelRepresentation:
-        M, F, R = self.state_process.representation().params
-        E = self.exposures.matrix
-        L = self.measurement_noise_std.matrix
-        const = self.constant.matrix[:, 0]
-        return LinearStateSpaceModelRepresentation(const, E, L, M, F, R)
+        E = self.exposures
+        LH = self.measurement_noise_std
+        const = self.constant[:, 0]
+
+        return LinearStateSpaceModelRepresentation.from_process_representation(
+            process_representation=self.state_process.representation(),
+            E=E, const=const, LH=LH)
 
     @check_is_defined
     def forecast(self, k: int, initial_state: np.ndarray) -> np.ndarray:
         return LinearSSMUtils.simulate_or_forecast(time_domain=k,
                                                    latent_process=self.state_process,
-                                                   exposures=self.exposures.matrix,
+                                                   exposures=self.exposures,
                                                    measurement_noise_std=self.measurement_noise_std,
                                                    initial_state=initial_state)
 
@@ -849,7 +819,7 @@ class LinearStateSpaceModel(CompositeModel):
     def simulate(self, k: int, burn: int = 0):
         return LinearSSMUtils.simulate_or_forecast(time_domain=k,
                                                    latent_process=self.state_process,
-                                                   exposures=self.exposures.matrix,
+                                                   exposures=self.exposures,
                                                    measurement_noise_std=self.measurement_noise_std,
                                                    burn=burn)
 
@@ -871,9 +841,9 @@ class LinearStateSpaceModel(CompositeModel):
             objective: Union[OptimizationObjective, Literal["EM"]]) -> LinearStateSpaceModelFit:
 
         n_series = series.shape[1]
-        self.constant.shape = (n_series, 1)
-        self.exposures.shape = (n_series, self.shape[0])
-        self.measurement_noise_std.shape = (n_series, n_series)
+        self._constant_signal.shape = (n_series, 1)
+        self._exposures_signal.shape = (n_series, self.shape[0])
+        self._measurement_noise_signal.shape = (n_series, n_series)
 
         if not self.is_defined:
             self._first_fit_to(series)
@@ -914,7 +884,7 @@ class LinearStateSpaceModel(CompositeModel):
             kf = KalmanFilter().set_endog(series).set_representation(self.representation()).set_initialization(self._kf_innit)
             Aj, Bj, Cj, Dj, Ej, Fj = kf.get_em_matrices()
 
-            L = self.measurement_noise_std.matrix
+            L = self.measurement_noise_std
             X = solve_triangular(L, np.eye(L.shape[0]), lower=True)
             H_inv = solve_triangular(L, X, lower=True, trans='T')
 
@@ -927,15 +897,15 @@ class LinearStateSpaceModel(CompositeModel):
             measurement_error_vars_new = np.diag((1 / series.shape[0]) * (Dj - Z @ Ej.T - Ej @ Z.T + Z @ Fj @ Z.T))
 
             self.state_process.update_params(next_latent_params)
-            self.exposures.update_params(next_exposure_params)
-            self.measurement_noise_std = np.sqrt(measurement_error_vars_new.reshape(self.measurement_noise_std.shape))
+            self._exposures_signal.update_params(next_exposure_params)
+            self._measurement_noise_signal = np.sqrt(measurement_error_vars_new.reshape(self.measurement_noise_std.shape))
 
     def _calc_em_next_exposure_params(self, Ej, Fj, H_inv):
 
-        current_exposure_params = self.exposures.get_params()
-        XI = self.exposures.jacobian_vec_params(order='F')
+        current_exposure_params = self._exposures_signal.get_params()
+        XI = self._exposures_signal.jacobian_vec_params(order='F')
 
-        M, _, _ = self.state_process.representation().params
+        M = self.state_process.representation().M
 
         # L = self.measurement_noise_std.matrix
         # X = solve_triangular(L, Ej, lower=True)
@@ -945,20 +915,21 @@ class LinearStateSpaceModel(CompositeModel):
 
         Gj = np.kron ((M @ Fj @ M.T).T, H_inv)
 
-        step = np.linalg.inv(XI.T @ Gj @ XI) @ XI.T @ (gj - Gj @ self.exposures.get_vectorized(order='F'))
+        step = np.linalg.inv(XI.T @ Gj @ XI) @ XI.T @ (gj - Gj @ self._exposures_signal.get_vectorized(order='F'))
 
         return current_exposure_params + step
 
     def _calc_em_next_latent_params(self, Aj, Bj, Cj, Ej, Fj, H_inv):
 
-        M, F, R = self.state_process.representation().params
+        repre = self.state_process.representation()
+        M, F, R = repre.M, repre.F, repre.R
 
         # L = self.measurement_noise_std.matrix
         # exposures = self.exposures.matrix
         # B = solve_triangular(L, exposures.T, lower=True, trans='T').T
         # exposures_H_inv = solve_triangular(L, B.T, lower=True).T
 
-        exposures = self.exposures.matrix
+        exposures = self.exposures
         exposures_H_inv = exposures @ H_inv
 
         g1j = exposures_H_inv @ Ej
@@ -984,7 +955,8 @@ class LinearStateSpaceModel(CompositeModel):
 
         def func(x):
             self.state_process.update_params(x)
-            repre = self.state_process.representation().params
+            repre = self.state_process.representation()
+            repre = (repre.M, repre.F, repre.R)
             return np.hstack([m.flatten('F') for m in repre])
 
         jacobian = numerical_jacobian(func, current_latent_params)
@@ -995,14 +967,14 @@ class LinearStateSpaceModel(CompositeModel):
 
     def _calc_em_next_latent_and_exposure_params(self, Bj, Cj, Ej, Fj):
 
-        M, F, R = self.state_process.representation().params
-
         XI = self._dvecFZ_dparams()
         repre = self.representation()
         f_theta1 = np.hstack([m.flatten('F') for m in [repre.F, repre.E @ repre.M]])
 
+        R = repre.R
+
         # theta_1, XI, f_theta1 = self.calc_dvecFZ_DexposuresArma(d_FIE, arma_params, exposures)
-        H_inv = np.linalg.inv(self.measurement_noise_std.matrix @ self.measurement_noise_std.matrix.T)
+        H_inv = np.linalg.inv(self.measurement_noise_std @ self.measurement_noise_std.T)
         Gj1 = np.kron(Cj.T, R @ R.T)
         Gj2 = np.kron(Fj.T, H_inv)
         Gj = block_diag(Gj1, Gj2)
@@ -1013,7 +985,7 @@ class LinearStateSpaceModel(CompositeModel):
 
         current_latent_params = self.state_process.get_params()
         n_latent = len(current_latent_params)
-        current_exposure_params = self.exposures.get_params()
+        current_exposure_params = self._exposures_signal.get_params()
 
         return current_latent_params + step[:n_latent], current_exposure_params + step[n_latent:]
 
