@@ -446,7 +446,7 @@ class LinearStateProcess(Model, ABC):
 
     def get_identifiable_state_space_model(self,
                              include_constant: bool,
-                             measurement_noise: Optional[Literal["zero", "diagonal", "full"]]) -> "LinearStateSpaceModel":
+                             measurement_noise: Literal["free", "zero", "diagonal"]) -> "LinearStateSpaceModel":
 
         scale_map = {
             'free': (False, False),
@@ -487,22 +487,11 @@ class LinearStateProcess(Model, ABC):
 
         constant = FreeMatrix((None, 1)) if include_constant else ZeroMatrix((None, 1))
 
-        measurement_noise_map = {
-            None: ZeroMatrix,
-            "zero": ZeroMatrix,
-            "diagonal": PosDiagonalMatrix,
-            "full": STDMatrix
-        }
-
-        try:
-            measurement_noise = measurement_noise_map[measurement_noise]((None, None))
-        except KeyError:
-            raise ValueError("Unknown measurement noise")
 
         ssm = LinearStateSpaceModel(linear_state_process=self,
                                     exposures=exposures,
                                     constant=constant,
-                                    measurement_noise_std=measurement_noise)
+                                    measurement_noise_constrain=measurement_noise)
 
         return ssm
 
