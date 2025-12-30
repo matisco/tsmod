@@ -31,6 +31,8 @@ class ARIMA(LinearStateProcess):
             "first_estimation_method": ["ma_matching", "two_step"],
         }
 
+        _immutable_options = tuple()
+
         def __init__(
             self,
             correlation_parameterization="hyperspherical",
@@ -223,7 +225,7 @@ class ARIMA(LinearStateProcess):
             self._ma_coeffs = values
 
     def _get_dynamic_params(self) -> np.ndarray:
-        params = np.empty((self.n_params,))
+        params = np.empty((self.n_dynamic_params,))
         params[:self.order[0]] = self._get_ar_params()
         params[self.order[0]:] = self._get_ma_params()
         return params
@@ -363,9 +365,8 @@ class ARIMA(LinearStateProcess):
             self.ar_coeffs = aprox_phi
             self.ma_coeffs = aprox_thetas
 
-
-
-
+        innovs = lfilter(self.ma_poly, self.ar_poly, series[:, 0])
+        self.cov = self._cov_to_constrained_cov(np.cov(innovs).reshape(1,1), validate=False)
 
 
 if __name__ == "__main__":

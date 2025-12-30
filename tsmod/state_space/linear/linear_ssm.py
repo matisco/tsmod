@@ -350,7 +350,7 @@ class LinearStateProcess(Model, ABC):
         params = np.empty((self.n_params,))
         n = self._cov_api.n_params
         params[:n] = self._cov_api.get_params()
-        params[n.n_params:] = self._get_dynamic_params()
+        params[n:] = self._get_dynamic_params()
         return params
 
     @property
