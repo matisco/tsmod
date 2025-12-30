@@ -3,7 +3,7 @@ from enum import Enum
 import numpy as np
 from abc import ABC, abstractmethod
 from functools import cached_property
-from typing import Literal
+from typing import Literal, Tuple, Optional
 from scipy.linalg import expm, logm
 import inspect
 
@@ -22,6 +22,7 @@ from utils import (softplus,
 #  2. currently whenever parameters are updated calculations which may be expensive are performed.
 #           It could be done lazily, doubt it makes a difference.
 #           If parameters are updated, one would think the matrix will be called
+#  3. A CorrMatrixAPI with implements std and cov interfaces could be useful in the future if parameterizations grow
 
 # -----------
 # Abstract classes. Base, composite and with underlying
@@ -1828,6 +1829,166 @@ class CorrMatrix(ConstrainedMatrixWithUnderlying):
         eigvals = np.linalg.eigvalsh(matrix)
         if np.any(eigvals < -1e-12):
             raise ValueError("Resulting correlation matrix is not positive definite")
+
+
+class ConstrainedCovarianceAPI(Signal):
+
+    _constrain_options = ("free", "zero", "identity", "diagonal", "correlation")
+
+
+    def __init__(self,
+                 shape: Tuple[Optional[int], Optional[int]],
+                 constrain: Literal["free", "zero", "identity", "diagonal", "correlation"]):
+
+        super().__init__(shape)
+
+        if (shape[0] is not None) or (shape[1] is not None):
+            if shape[0] != shape[1]:
+                raise ValueError("Shape of matrix must be square")
+
+        if constrain not in self._constrain_options:
+            raise ValueError(f"Constraint must be one of {self._constrain_options}")
+
+        self._constrain = constrain
+        self._correlation_parameterization = "hyperspherical"
+
+
+        _corr_parameterization_to_underlying_map = {"log": lambda shape: CorrMatrix(shape, parameterization="log"),
+                                                    "hyperspherical": lambda shape: SqrtCorrMatrix(shape),
+                                                    }
+        # for hyperspherical i could use CorrMatrix(shape, parameterization="hyperspherical"), but here i prefer to use
+        #   SqrtCorrMatrix as, although it creates some boilerplate, it gives direct access to the std matrix
+
+        _constrain_to_underlying_map = {"free": STDMatrix,
+                                        "zero": ZeroMatrix,
+                                        "identity": IdentityMatrix,
+                                        "diagonal": PosDiagonalMatrix,
+                                        "correlation": _corr_parameterization_to_underlying_map[self._correlation_parameterization],
+                                        }
+
+        self._underlying_constrained_matrix = _constrain_to_underlying_map[constrain](shape)
+
+
+        # manual caching
+        self._std = None
+        self._cov = None
+
+    @property
+    @check_is_defined
+    def std(self):
+        if self._std is None:
+            self._std = self._std_getter()
+        return self._std
+
+    @std.setter
+    def std(self, value):
+        self._std_setter(value, True)
+
+    def set_std(self, value):
+        self.std = value
+
+    def set_std_trusted(self, value):
+        self._std_setter(value, False)
+
+    @property
+    @check_is_defined
+    def cov(self):
+        if self._cov is None:
+            self._cov = self._cov_getter()
+        return self._cov
+
+    @cov.setter
+    def cov(self, value):
+        self._cov_setter(value, True)
+
+    def set_cov(self, value):
+        self.cov = value
+
+    def set_cov_trusted(self, value):
+        self._cov_setter(value, False)
+
+    def _cov_getter(self):
+
+        _correlation_parameterization_to_cov_map = {"log": lambda matrix: matrix,
+                                                    "hyperspherical": lambda matrix: matrix @ matrix.T,
+                                                    }
+
+        _underlying_to_cov_map = {"free": lambda matrix: matrix @ matrix.T,
+                                  "zero": lambda matrix: matrix,
+                                  "identity": lambda matrix: matrix,
+                                  "diagonal": lambda matrix: matrix @ matrix.T,
+                                  "correlation": _correlation_parameterization_to_cov_map[self._correlation_parameterization],
+                                  }
+
+        return _underlying_to_cov_map[self._constrain](self._underlying_constrained_matrix.matrix)
+
+    def _cov_setter(self, value, validate: bool = True):
+
+        _cov_to_correlation_parameterization_map = {"log": lambda matrix: matrix,
+                                                    "hyperspherical": lambda matrix: np.linalg.cholesky(matrix),
+                                                    }
+
+        _cov_to_underlying_map = {"free": lambda matrix: np.linalg.cholesky(matrix),
+                                  "zero": lambda matrix: matrix,
+                                  "identity": lambda matrix: matrix,
+                                  "diagonal": lambda matrix: np.sqrt(matrix),
+                                  "correlation": _cov_to_correlation_parameterization_map[
+                                      self._correlation_parameterization],
+                                  }
+        if validate:
+            self._underlying_constrained_matrix.set_matrix(_cov_to_underlying_map[self._constrain](value))
+        else:
+            self._underlying_constrained_matrix.set_matrix_trusted(_cov_to_underlying_map[self._constrain](value))
+
+    def _std_getter(self):
+
+        _correlation_parameterization_to_std_map = {"log": lambda matrix: np.linalg.cholesky(matrix),
+                                                    "hyperspherical": lambda matrix: matrix,
+                                                    }
+
+        _underlying_to_std_map = {"free": lambda matrix: matrix,
+                                  "zero": lambda matrix: matrix,
+                                  "identity": lambda matrix: matrix,
+                                  "diagonal": lambda matrix: matrix,
+                                  "correlation": _correlation_parameterization_to_std_map[self._correlation_parameterization],
+                                  }
+
+        return _underlying_to_std_map[self._constrain](self._underlying_constrained_matrix.matrix)
+
+    def _std_setter(self, value, validate: bool = True):
+
+        _std_to_correlation_parameterization_map = {"log": lambda matrix: matrix @ matrix.T,
+                                                    "hyperspherical": lambda matrix: matrix,
+                                                    }
+
+        _std_to_underlying_map = {"free": lambda matrix: matrix,
+                                  "zero": lambda matrix: matrix,
+                                  "identity": lambda matrix: matrix,
+                                  "diagonal": lambda matrix: matrix,
+                                  "correlation": _std_to_correlation_parameterization_map[self._correlation_parameterization],
+                                  }
+
+        if validate:
+            self._underlying_constrained_matrix.set_matrix(_std_to_underlying_map[self._constrain](value))
+        else:
+            self._underlying_constrained_matrix.set_matrix_trusted(_std_to_underlying_map[self._constrain](value))
+
+    @property
+    def is_defined(self):
+        return self._underlying_constrained_matrix.is_defined
+
+    @property
+    def _n_params(self) -> int:
+        return self._underlying_constrained_matrix.n_params
+
+    def _get_params(self) -> np.ndarray:
+        return self._underlying_constrained_matrix.get_params()
+
+    def _update_params(self, params: np.ndarray) -> None:
+        self._std = None
+        self._cov = None
+        self._underlying_constrained_matrix.update_params(params)
+
 
 
 # ----------

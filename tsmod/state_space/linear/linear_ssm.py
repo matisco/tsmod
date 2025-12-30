@@ -33,6 +33,9 @@ from representation import LinearStateSpaceModelRepresentation, LinearStateProce
 
 from utils import numerical_jacobian
 
+# TODO: HIGH PRIORITY
+#       1. Add support for changing the correlation matrix parameterization after it is defined, or dont allow it to happen
+#       2. Change EM, currently its wrong because the representation was changed
 
 # TODO: MEDIUM PRIORITY
 #       1. Add adaptive step to EM optimization (should take very little effort)
@@ -237,7 +240,7 @@ class LinearStateProcess(Model, ABC):
                     merged.update(base._valid_options)
             return merged
 
-    _scale_constrain_options = ["free", "identity", "diagonal", "correlation"]
+    _scale_constrain_options = ("free", "identity", "diagonal", "correlation")
 
     def __init__(self,
                  shape: tuple,
