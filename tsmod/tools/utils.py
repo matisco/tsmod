@@ -17,8 +17,8 @@ def validate_chol_factor(LQ):
     """Check that LQ is lower triangular with positive diagonal."""
     if not np.allclose(LQ, np.tril(LQ)):
         raise ValueError("LQ must be lower triangular")
-    if np.any(np.diag(LQ) <= 0):
-        raise ValueError("Diagonal entries of LQ must be positive")
+    if np.any(np.diag(LQ) < 0):
+        raise ValueError("Diagonal entries of LQ must be non-negative")
 
 
 def covariance_to_correlation(cov_matrix: np.ndarray) -> np.ndarray:

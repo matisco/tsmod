@@ -404,19 +404,20 @@ if __name__ == "__main__":
     print(f"phis: {phis}, k: {k}, thetas: {thetas}")
 
 
+
     for rep in ["hamilton", "ihamilton", "harvey"]:
         arima.set_advanced_option("representation", rep)
 
         arima._first_fit_to(simulated_series.reshape(-1, 1))
 
         inc_const = False
-        measurement_noise = "diagonal"
+        measurement_noise = "zero"
 
         res = arima.fit(simulated_series.reshape(-1, 1),
                         include_constant=inc_const,
                         measurement_noise=measurement_noise)
 
-        print(f"nll: {res.nll}. ar: {arima.ar_coeffs}. ma: {arima.ma_coeffs}, e: {res.model.exposures}, std: {res.model.measurement_noise_std}")
+        print(f"nll: {res.nll}. ar: {arima.ar_coeffs}. ma: {arima.ma_coeffs}, e: {res.model.exposures}, inov std: {arima.std}, error std: {res.model.measurement_noise_std}")
 
 
     # for _ in range(0):

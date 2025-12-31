@@ -311,12 +311,30 @@ class LinearStateProcess(Model, ABC):
         self._cov_setter(value, True)
 
     def _std_setter(self, value, validate: bool = True):
+        if isinstance(value, float) or isinstance(value, int):
+            value = np.array([value]).reshape(1, 1)
+
+        if not isinstance(value, np.ndarray):
+            raise TypeError("Std must be a numpy array")
+
+        if value.ndim != 2:
+            raise ValueError("Std must be a 2-dimensional array")
+
         if validate:
             self._cov_api.set_std(value)
         else:
             self._cov_api.set_std_trusted(value)
 
     def _cov_setter(self, value, validate: bool = True):
+        if isinstance(value, float) or isinstance(value, int):
+            value = np.array([value]).reshape(1, 1)
+
+        if not isinstance(value, np.ndarray):
+            raise TypeError("Std must be a numpy array")
+
+        if value.ndim != 2:
+            raise ValueError("Std must be a 2-dimensional array")
+
         if validate:
             self._cov_api.set_cov(value)
         else:
@@ -566,6 +584,7 @@ class LinearStateProcess(Model, ABC):
         ssm = self.get_identifiable_state_space_model(include_constant, measurement_noise)
 
 
+
 class CompositeLinearStateProcess(CompositeModel, LinearStateProcess):
 
     def __init__(self,
@@ -576,7 +595,12 @@ class CompositeLinearStateProcess(CompositeModel, LinearStateProcess):
 
         self._check_innit()
 
-        super().__init__((self._mixing_matrix.shape[0], 1))
+        innovation_dim = sum(lsp.innovation_dim for lsp in self._underlying_processes)
+
+        CompositeModel.__init__((self._mixing_matrix.shape[0], 1))
+        LinearStateProcess.__init__((self._mixing_matrix.shape[0], 1),
+                                    innovation_dim,
+                                    )
 
     def _check_innit(self):
         if not isinstance(self._mixing_matrix, np.ndarray):
@@ -585,16 +609,16 @@ class CompositeLinearStateProcess(CompositeModel, LinearStateProcess):
         if not self._mixing_matrix.ndim == 2:
             raise ValueError("Mixing matrix must be an 2D np.ndarray.")
 
-        shape_of_underlying = 0
         for row in self.mixing_matrix:
             idxs = row == 0
             shapes = [self._underlying_processes[i].shape[0] for i in idxs]
             if len(set(shapes)) != 1:
                 raise ValueError("Shape missmatch. Can not sum processes of different sizes.")
-            shape_of_underlying += shapes[0]
+
+        shape_of_underlying = sum(lsp.shape[0] for lsp in self._underlying_processes)
 
         if not self._mixing_matrix.shape[1] == shape_of_underlying:
-            raise ValueError("Shape missmatch. Mixing matrix with .")
+            raise ValueError("Shape missmatch. Mixing matrix with underlying processes")
 
     @cached_property
     def rotational_symmetries(self) -> list[RotationalSymmetry]:
@@ -667,8 +691,9 @@ class CompositeLinearStateProcess(CompositeModel, LinearStateProcess):
         reps = [process.representation(*args, **kwargs) for process in self._underlying_processes]
         F = block_diag([rep.F for rep in reps])
         R = block_diag([rep.R for rep in reps])
+        Q = block_diag([rep.Q for rep in reps])
         M = self.mixing_matrix @ block_diag([rep.M for rep in reps])
-        return LinearStateProcessRepresentation(M, F, R)
+        return LinearStateProcessRepresentation(M, F, R, Q=Q)
 
     def representation_structure(self) -> RepresentationStructure:
         structs = [lp.representation_structure for lp in self._underlying_processes]

@@ -120,6 +120,9 @@ class LinearStateProcessRepresentation:
                     LQ, Q,
                     validate: bool = True):
 
+        if LQ is None and Q is None:
+            raise ValueError("At least one of LH or H must be provided")
+
         self._M = M
         self._F = F
         self._R = R

@@ -109,9 +109,10 @@ class ApproximateFI(LinearStateProcess):
     def _first_fit_to(self, series: np.ndarray):
         self.T = series.shape[0]
         self.d = estimate_fractional_d_ewl(series[:, 0])
-        if self.scale_constrain == 'diagonal':
-            innvos = frac_diff(series[:, 0], self.d)
-            std_innov = np.std(innvos)
+
+        innovs = frac_diff(series[:, 0], self.d)
+        self.cov = self._cov_to_constrained_cov(np.cov(innovs).reshape(1,1), False)
+        self._update_underlying_arima()
 
     @property
     def representation_structure(self) -> RepresentationStructure:
@@ -181,9 +182,10 @@ if __name__ == "__main__":
 
             start_time = time.time()
             res = approx_fie.fit(simulated_series.reshape(-1, 1),
-                                 measurement_noise="diagonal")
+                                 measurement_noise="zero")
             end_time = time.time()
-            print(f"Iter {iter},  Elapsed time: {end_time - start_time}. Method NLL, with {approx_fie._underlying_arima.advanced_options.representation}, {approx_fie.advanced_options.representation}. NLL: {res.nll}. d = {approx_fie.d}, e = {res.model.exposures}, n = {res.model.measurement_noise_std}")
+            print(f"Iter {iter},  Elapsed time: {end_time - start_time}. Method NLL, with {approx_fie._underlying_arima.advanced_options.representation}, {approx_fie.advanced_options.representation}.")
+            print(f"NLL: {res.nll}. d = {approx_fie.d}, inov_cov = {approx_fie.cov}, exp = {res.model.exposures}, noise std = {res.model.measurement_noise_std}")
 
             approx_fie._first_fit_to(simulated_series.reshape(-1, 1))
 

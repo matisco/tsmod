@@ -1885,7 +1885,7 @@ class ConstrainedCovarianceAPI(Signal):
         self._std_setter(value, True)
 
     def set_std(self, value):
-        self.std = value
+        self._std_setter(value, True)
 
     def set_std_trusted(self, value):
         self._std_setter(value, False)
