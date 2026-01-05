@@ -2,10 +2,10 @@ from typing import Tuple, Literal
 import numpy as np
 from collections import defaultdict
 
+from state_space.tools.kalman_filter import KalmanFilterInitialization
 # from base import ModelFit
 # from build.lib.tsmod.optimization_objectives import GaussianNLL
-from tsmod.state_space.linear.linear_ssm import (LinearStateProcess, LinearStateProcessRepresentation,
-                                                 RotationalSymmetry, RepresentationStructure, StructuralVariability)
+from tsmod.state_space.linear.linear_ssm import (AtomicLinearStateProcess, LinearStateProcessDynamics)
 
 from arfima_utils import (transformed_pacfs_to_coeffs,
                           coeffs_to_transformed_pacfs,
@@ -19,9 +19,9 @@ from arfima_utils import (transformed_pacfs_to_coeffs,
                           )
 
 
-class ARIMA(LinearStateProcess):
+class ARIMA(AtomicLinearStateProcess):
 
-    class AdvancedOptions(LinearStateProcess.AdvancedOptions):
+    class AdvancedOptions(AtomicLinearStateProcess.AdvancedOptions):
 
         representation: Literal["harvey", "hamilton", "ihamilton"]
         first_estimation_method: Literal["ma_matching", "two_step"]
@@ -37,7 +37,7 @@ class ARIMA(LinearStateProcess):
             self,
             correlation_parameterization="hyperspherical",
             representation="harvey",
-            first_estimation_method="ma_matching"
+            first_estimation_method="ma_matching",
         ):
             super().__init__(**{k: v for k, v in locals().items() if k != "self" and k != "__class__"})
 
@@ -52,7 +52,7 @@ class ARIMA(LinearStateProcess):
             raise ValueError(f"Order must be non-negative, got {order}")
 
         advanced_options = advanced_options or self.AdvancedOptions()
-        super().__init__(shape=(1,1),
+        super().__init__(process_dim=1,
                          innovation_dim=1,
                          scale_constrain="identity" if fix_scale else "diagonal",
                          advanced_options=advanced_options)
@@ -249,7 +249,8 @@ class ARIMA(LinearStateProcess):
                 f"{self._advanced_options.get_valid_options()['representation']}"
             )
 
-    def representation(self, *args, **kwargs) -> LinearStateProcessRepresentation:
+    @property
+    def dynamic_representation(self) -> LinearStateProcessDynamics:
         phis = self.ar_coeffs
         thetas = self.ma_coeffs
         k = self.order[1]
@@ -265,49 +266,7 @@ class ARIMA(LinearStateProcess):
                 f"{self._advanced_options.get_valid_options()['representation']}"
             )
 
-        return LinearStateProcessRepresentation(M, F, R)
-
-    @property
-    def representation_structure(self) -> RepresentationStructure:
-
-        rep = self._advanced_options.representation
-
-        if rep == "ihamilton":
-            # Special case depending on order[1]
-            if self.order[1] == 0:
-                structures = (
-                    StructuralVariability.PARAMETRIC,
-                    StructuralVariability.PARAMETRIC,
-                    StructuralVariability.FIXED,
-                )
-            else:
-                structures = (
-                    StructuralVariability.FIXED,
-                    StructuralVariability.PARAMETRIC,
-                    StructuralVariability.PARAMETRIC,
-                )
-        elif rep == "hamilton":
-            structures = (
-                StructuralVariability.PARAMETRIC,
-                StructuralVariability.PARAMETRIC,
-                StructuralVariability.FIXED,
-            )
-        elif rep == "harvey":
-            structures = (
-                StructuralVariability.FIXED,
-                StructuralVariability.PARAMETRIC,
-                StructuralVariability.PARAMETRIC,
-            )
-        else:
-            valid_options = self.advanced_options.get_valid_options()["representation"]
-            raise ValueError(f"Unknown representation choice. Valid choices are {valid_options}")
-
-        M_structure, F_structure, R_structure = structures
-        return RepresentationStructure(M=M_structure, F=F_structure, R=R_structure)
-
-    @property
-    def rotational_symmetries(self) -> list[RotationalSymmetry]:
-        return []
+        return LinearStateProcessDynamics(M=M, F=F, R=R)
 
     def _first_fit_to(self, series: np.ndarray):
 

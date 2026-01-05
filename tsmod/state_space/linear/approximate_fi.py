@@ -2,15 +2,15 @@ import numpy as np
 from typing import Literal
 
 from arima import ARIMA
-from tsmod.state_space.linear.linear_ssm import (LinearStateProcess, LinearStateProcessRepresentation,
-                                                 RotationalSymmetry, RepresentationStructure)
+from tsmod.state_space.linear.linear_ssm import (AtomicLinearStateProcess, LinearStateProcessDynamics)
+
 from arfima_utils import estimate_fractional_d_ewl, frac_diff
 from fi2arima import FracIEARIMAApproximator
 
 
-class ApproximateFI(LinearStateProcess):
+class ApproximateFI(AtomicLinearStateProcess):
 
-    class AdvancedOptions(LinearStateProcess.AdvancedOptions):
+    class AdvancedOptions(AtomicLinearStateProcess.AdvancedOptions):
 
         representation: Literal["harvey", "hamilton", "ihamilton"]
 
@@ -41,7 +41,7 @@ class ApproximateFI(LinearStateProcess):
 
         advanced_options = advanced_options or self.AdvancedOptions()
         advanced_options._owner = self
-        super().__init__(shape=(1, 1),
+        super().__init__(process_dim=1,
                          innovation_dim=1,
                          scale_constrain="identity" if fix_scale else "diagonal",
                          advanced_options=advanced_options)
@@ -115,15 +115,8 @@ class ApproximateFI(LinearStateProcess):
         self._update_underlying_arima()
 
     @property
-    def representation_structure(self) -> RepresentationStructure:
-        return self._underlying_arima.representation_structure
-
-    @property
-    def rotational_symmetries(self) -> list[RotationalSymmetry]:
-        return []
-
-    def representation(self, *args, **kwargs) -> LinearStateProcessRepresentation:
-        return self._underlying_arima.representation(*args, **kwargs)
+    def dynamic_representation(self) -> LinearStateProcessDynamics:
+        return self._underlying_arima.dynamic_representation
 
 
 

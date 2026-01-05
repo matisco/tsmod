@@ -4,10 +4,10 @@ import numpy as np
 from abc import ABC, abstractmethod
 from functools import cached_property
 from typing import Literal, Tuple, Optional
-from scipy.linalg import expm, logm
+from scipy.linalg import expm, logm, block_diag
 import inspect
 
-from base import Signal, check_is_defined, CompositeSignal
+from base import Signal, check_is_defined, CompositeMixin
 
 from utils import (softplus,
                    softplus_inv,
@@ -94,7 +94,7 @@ class ConstrainedMatrix(Signal, ABC):
             )
 
     def __init__(self,
-                 shape: tuple):
+                 shape: tuple[ Optional[int], Optional[int] ]):
 
         super().__init__(shape)
         if self._enforce_square:
@@ -103,9 +103,6 @@ class ConstrainedMatrix(Signal, ABC):
                     raise ValueError("Shape of matrix must be square")
 
         self._matrix = None
-
-    # def __getitem__(self, key):
-    #     return self._matrix[key]
 
     @property
     def matrix(self):
@@ -224,7 +221,8 @@ class ConstrainedMatrix(Signal, ABC):
         return Jac
 
 
-class CompositeConstraintMatrix(CompositeSignal, ConstrainedMatrix):
+
+class CompositeConstraintMatrix(CompositeMixin, ConstrainedMatrix):
 
     _enforce_square = False
 
@@ -240,12 +238,11 @@ class CompositeConstraintMatrix(CompositeSignal, ConstrainedMatrix):
             - 'hstack': horizontally stack the matrices
             - 'blockdiag': place matrices along the block diagonal
         """
-        self._underlying_matrices = matrices
         self.combine = combine
-
         shape = self._check_init_and_infer_shape()
 
-        super().__init__(shape)
+        CompositeMixin.__init__(self, matrices)
+        ConstrainedMatrix.__init__(self, shape)
 
     @property
     def _is_elementwise(self) -> bool:
@@ -333,31 +330,16 @@ class CompositeConstraintMatrix(CompositeSignal, ConstrainedMatrix):
         else:
             raise ValueError(f"Unknown combine mode: {self.combine}")
 
-    @property
-    def shape(self):
-        return self._shape
-
-    @shape.setter
-    def shape(self, value: tuple[int | None, int | None]):
-        if not isinstance(value, tuple):
-            raise TypeError(f"shape must be a tuple, got {type(value)}")
-        if len(value) != 2:
-            raise ValueError(f"shape must be length 2, got length {len(value)}")
-        if not all(isinstance(x, (int, type(None))) for x in value):
-            raise TypeError("Each element of shape must be an int or None")
-
-        shape = self.check_or_infer_shape(value)
+    def _on_shape_setter(self, new_shape: tuple[Optional[int], Optional[int]]) -> None:
 
         if self.combine == "vstack":
-            for m in self._underlying_matrices:
+            for m in self._underlying_signals:
                 if m is not self:
-                    m.shape = (None, shape[1])
+                    m.shape = (None, new_shape[1])
         elif self.combine == "hstack":
-            for m in self._underlying_matrices:
+            for m in self._underlying_signals:
                 if m is not self:
-                    m.shape = (shape[0], None)
-
-        self._shape = shape
+                    m.shape = (new_shape[0], None)
 
     def _iterate_blocks(self, matrix):
         """
@@ -392,10 +374,6 @@ class CompositeConstraintMatrix(CompositeSignal, ConstrainedMatrix):
     def _on_matrix_setter(self, matrix):
         for submat, m in self._iterate_blocks(matrix):
             m.matrix = submat
-
-    @property
-    def _underlying_signals(self) -> list[Signal]:
-        return self._underlying_matrices
 
     def _check_matrix_constrain(self, matrix):
         for submat, m in self._iterate_blocks(matrix):
@@ -1873,6 +1851,9 @@ class ConstrainedCovarianceAPI(Signal):
         self._std = None
         self._cov = None
 
+    def _on_shape_setter(self, new_shape: tuple[int | None, int | None]):
+        self._underlying_constrained_matrix.shape = new_shape
+
     @property
     @check_is_defined
     def std(self):
@@ -1991,6 +1972,15 @@ class ConstrainedCovarianceAPI(Signal):
 
 
 
+class BlockCorr:
+
+    def __init__(self, block_sizes: list[int]):
+
+        self._block_sizes = block_sizes
+
+    def constrain_block(self, i: int, j: int, constrain: Literal["equal", "zero"]):
+        ''''''
+
 # ----------
 # Testing
 #--------
@@ -2093,42 +2083,83 @@ if __name__ == "__main__":
 
 
 
-    shape = (10, 5)
-    constraints = {(0,0): 1, (0, 2): 0, (1, 2): 1}
-    exposures = ElementWiseConstrainedMatrix(shape, constraints)
+    # shape = (10, 5)
+    # constraints = {(0,0): 1, (0, 2): 0, (1, 2): 1}
+    # exposures = ElementWiseConstrainedMatrix(shape, constraints)
+    #
+    # exposure0 = get_randos(*shape)[0]
+    # for key, value in constraints.items():
+    #     exposure0[key] = value
+    #
+    # exposures.matrix = exposure0
+    #
+    # jac1 = exposures.jacobian_vec_params(order='F')
+    # jac2 = exposures.numerical_jacobian_vec_params(order='F')
+    #
+    # if not np.allclose(jac1, jac2):
+    #     print(jac1, jac2)
+    #     raise ValueError("hello")
+    #
+    # rep_random = 1000
+    # start_time = time.time()
+    # for _ in range(rep_random):
+    #     new_params = np.random.rand(exposures.n_params)
+    #     exposures.update_params(new_params)
+    #     jac = exposures.jacobian_vec_params(order='F')
+    # end_time = time.time()
+    # print(f"Elapsed time: {end_time - start_time}")
+    #
+    # rep_random = 1000
+    # start_time = time.time()
+    # for _ in range(rep_random):
+    #     new_params = np.random.rand(exposures.n_params)
+    #     exposures.update_params(new_params)
+    #     jac = exposures.numerical_jacobian_vec_params(order='F')
+    # end_time = time.time()
+    # print(f"Elapsed time: {end_time - start_time}")
 
-    exposure0 = get_randos(*shape)[0]
-    for key, value in constraints.items():
-        exposure0[key] = value
 
-    exposures.matrix = exposure0
+    def make_block_corr(block_sizes: list[int]):
 
-    jac1 = exposures.jacobian_vec_params(order='F')
-    jac2 = exposures.numerical_jacobian_vec_params(order='F')
+        diagonal_blocks = []
+        for size in block_sizes:
+            corr = CorrMatrix(shape=(size, size), parameterization="log")
 
-    if not np.allclose(jac1, jac2):
-        print(jac1, jac2)
-        raise ValueError("hello")
+            corr.update_params(np.random.randn(corr.n_params))
 
-    rep_random = 1000
-    start_time = time.time()
-    for _ in range(rep_random):
-        new_params = np.random.rand(exposures.n_params)
-        exposures.update_params(new_params)
-        jac = exposures.jacobian_vec_params(order='F')
-    end_time = time.time()
-    print(f"Elapsed time: {end_time - start_time}")
+            diagonal_blocks.append(corr.matrix)
 
-    rep_random = 1000
-    start_time = time.time()
-    for _ in range(rep_random):
-        new_params = np.random.rand(exposures.n_params)
-        exposures.update_params(new_params)
-        jac = exposures.numerical_jacobian_vec_params(order='F')
-    end_time = time.time()
-    print(f"Elapsed time: {end_time - start_time}")
+        n = len(block_sizes)
+        n_blocks = (n*n - n) / 2
+
+        corr_matrix = block_diag(*diagonal_blocks)
+        block_sizes.insert(0, 0)
+        idx_blocks = np.cumsum(block_sizes)
+
+        print(corr_matrix)
+        print(idx_blocks)
+
+        for i in range(n):
+            for j in range(i + 1, n):
+                is_not_zero = np.random.rand() > 0.2
+                if is_not_zero:
+                    corr_value = (np.random.rand() * 2 - 1) / 1.5
+                    corr_matrix[idx_blocks[i]:idx_blocks[i+1], idx_blocks[j]:idx_blocks[j+1]] = corr_value
+                    corr_matrix[idx_blocks[j]:idx_blocks[j+1], idx_blocks[i]:idx_blocks[i+1]] = corr_value
+
+        print(corr_matrix)
+        shape0 = sum(block_sizes)
+        # CorrMatrix((shape0, shape0), parameterization="hyperspherical").matrix = corr_matrix
+
+        idx = np.tril_indices(n=shape0, k=-1, m=shape0)
+        m = LogCorrMatrix((shape0, shape0))
+        m.update_params(corr_matrix[idx])
+        print(m.matrix)
+        print(expm(m.matrix))
 
 
+    np.set_printoptions(precision=3, linewidth=120)
+    make_block_corr([2, 2, 2])
 
 
 

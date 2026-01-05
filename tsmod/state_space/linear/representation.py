@@ -1,11 +1,13 @@
+from typing import Optional
+from functools import cached_property  # wraps
+from dataclasses import dataclass
+
 import numpy as np
 from scipy.linalg import solve_discrete_are
 from numba import njit
 
-from typing import Optional
-from functools import cached_property  # wraps
-
 from tsmod.tools.utils import validate_covariance, validate_chol_factor
+
 
 @njit
 def steady_state_P_riccati(Z, H, F, Q, starter_P=None) -> np.ndarray:
@@ -102,7 +104,26 @@ def steady_state_P_dare(Z, H, F, Q) -> np.ndarray:
 # StateSpace Representation Classes
 # ---------
 
+@dataclass(frozen=True)
+class LinearStateProcessDynamics:
+    M: np.ndarray
+    F: np.ndarray
+    R: np.ndarray
+
+
 class LinearStateProcessRepresentation:
+
+    @classmethod
+    def from_dynamic_representation(cls,
+                                    dynamic_representation: LinearStateProcessDynamics,
+                                    LQ: Optional[np.ndarray] = None, Q: Optional[np.ndarray] = None,
+                                    validate: bool = True) -> "LinearStateProcessRepresentation":
+        return cls(M=dynamic_representation.M,
+                   F=dynamic_representation.F,
+                   R=dynamic_representation.R,
+                   LQ=LQ, Q=Q,
+                   validate=validate)
+
 
     def __init__(self, M, F, R,
                  LQ: Optional[np.ndarray] = None, Q: Optional[np.ndarray] = None,
@@ -448,5 +469,4 @@ class MutableLinearStateSpaceModelRepresentation(LinearStateSpaceModelRepresenta
     def set_steady_state_calculation(self, value):
         self.steady_state_calculation_method = value
         return self
-
 

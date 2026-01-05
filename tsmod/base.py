@@ -2,7 +2,8 @@ from abc import ABC, abstractmethod
 from sympy.core.cache import cached_property
 import warnings
 from functools import wraps
-from typing import Optional, Literal, Type, Union, ClassVar, Any
+from typing import Optional, Literal, Type, Union, ClassVar, Any, TypeVar, Generic, Sequence, Tuple
+
 from collections.abc import Iterable
 
 import numpy as np
@@ -446,8 +447,9 @@ class ModelFit(ABC):
 
 
 class Signal(ABC):
+    """Abstract base class for signals."""
 
-    def __init__(self, shape: tuple, **signal_init):
+    def __init__(self, shape: tuple[Optional[int], Optional[int]]):
         if not isinstance(shape, tuple):
             raise TypeError(f"shape must be a tuple, got {type(shape)}")
         if len(shape) != 2:
@@ -455,73 +457,31 @@ class Signal(ABC):
         if not all(isinstance(x, (int, type(None))) for x in shape):
             raise TypeError("Each element of shape must be an int or None")
 
-        self._is_frozen = False
         self._shape = shape
-        self._signal_init = signal_init
-
-    @property
-    def is_frozen(self):
-        return self._is_frozen
-
-    def freeze(self):
-        self._is_frozen = True
-
-    def unfreeze(self):
         self._is_frozen = False
-
-    # @property
-    # def is_frozen(self):
-    #     return self._get_is_frozen()
-    #
-    # @is_frozen.setter
-    # def is_frozen(self, value):
-    #     self._set_is_frozen(value)
-    #
-    # def _get_is_frozen(self):
-    #     return getattr(self, "_is_frozen", False)
-    #
-    # def _set_is_frozen(self, value):
-    #     super().__setattr__("_is_frozen", bool(value))
-
-    def __setattr__(self, name, value):
-        # Skip checks for the internal frozen flag itself
-        if name != "_is_frozen" and getattr(self, "is_frozen", False):
-            # Allow shape to be set only if unchanged
-            if name == "shape" and getattr(self, "shape", None) != value:
-                raise RuntimeError("Cannot modify shape of a frozen object.")
-            # Block all other attribute changes
-            elif name != "shape":
-                raise RuntimeError(f"Cannot modify '{name}' of a frozen object.")
-        super().__setattr__(name, value)
-
-    @property
-    @abstractmethod
-    def is_defined(self):
-        raise NotImplementedError
 
     @property
     def shape(self):
         return self._shape
 
+    @shape.setter
+    def shape(self, value: tuple[int | None, int | None]):
+        if not isinstance(value, tuple):
+            raise TypeError(f"shape must be a tuple, got {type(value)}")
+        if len(value) != 2:
+            raise ValueError(f"shape must be length 2, got length {len(value)}")
+        if not all(isinstance(x, (int, type(None))) for x in value):
+            raise TypeError("Each element of shape must be an int or None")
+
+        # Call the optional hook for subclasses to customize behavior.
+        new_shape = self.check_or_infer_shape(value)
+        self._on_shape_setter(new_shape)
+
+        self._shape = new_shape
+
     def check_or_infer_shape(self, proposed_shape: tuple[int | None, int | None]):
-        """
-        Check the proposed shape against current shape, and infer missing dimensions if possible.
-
-        Parameters
-        ----------
-        proposed_shape : tuple[int | None, int | None]
-            The shape to check/infer.
-
-        Returns
-        -------
-        tuple[int, int]
-            Fully specified shape after inference.
-
-        Raises
-        ------
-        ValueError
-            If the proposed shape conflicts with current shape or cannot be inferred.
-        """
+        """Check the proposed shape against current shape, and infer missing dimensions if possible."""
+        # Some logic to check or infer shape
         if not isinstance(proposed_shape, tuple) or len(proposed_shape) != 2:
             raise TypeError("proposed_shape must be a tuple of length 2")
 
@@ -536,23 +496,9 @@ class Signal(ABC):
 
         return tuple(result)
 
-    @shape.setter
-    def shape(self, value: tuple[int | None, int | None]):
-        if not isinstance(value, tuple):
-            raise TypeError(f"shape must be a tuple, got {type(value)}")
-        if len(value) != 2:
-            raise ValueError(f"shape must be length 2, got length {len(value)}")
-        if not all(isinstance(x, (int, type(None))) for x in value):
-            raise TypeError("Each element of shape must be an int or None")
-
-        shape = self.check_or_infer_shape(value)
-
-        self._on_shape_setter(shape)
-
-        self._shape = shape
-
-    def _on_shape_setter(self, shape: tuple[int | None, int | None]):
-        """Hook for subclasses to override if needed."""
+    def _on_shape_setter(self, new_shape: tuple[int | None, int | None]):
+        """Hook method for subclasses to override if needed."""
+        # This method does nothing by default but can be overridden by subclasses
         pass
 
     @property
@@ -560,121 +506,118 @@ class Signal(ABC):
         return all(i is not None for i in self.shape)
 
     @property
-    def signal_initialization(self):
-        return self._signal_init.copy()
+    def is_frozen(self) -> bool:
+        return self._is_frozen
+
+    def freeze(self):
+        self._is_frozen = True
+
+    def unfreeze(self):
+        self._is_frozen = False
 
     @property
-    def n_params(self):
+    @abstractmethod
+    def is_defined(self):
+        pass
+
+    @property
+    def n_params(self) -> int:
         return 0 if self.is_frozen else self._n_params
 
     @property
-    def n_tot_params(self):
+    def n_tot_params(self) -> int:
         return self._n_params
 
     @property
     @abstractmethod
     def _n_params(self) -> int:
-        raise NotImplementedError
+        pass
 
-    @check_is_defined
-    def get_params(self) ->  np.ndarray:
+    def get_params(self) -> np.ndarray:
+        if not self.is_defined:
+            raise RuntimeError("Undefined Signal does not have params")
+        if self.is_frozen:
+            return np.array([])
         return self._get_params()
 
     @abstractmethod
     def _get_params(self) -> np.ndarray:
-        raise NotImplementedError
+        pass
 
-    def update_params(self, params: np.ndarray) -> None:
-        if self.is_frozen or not self.has_shape:
-            return
-        self._update_params(params if params.flags.writeable else params.copy())
-
-        # if self.is_frozen:
-        #     raise warnings.warn("Object is frozen and can not be updated.", UserWarning)
-        # elif not self.has_shape:
-        #     raise warnings.warn("Object has no shape and can not be updated.", UserWarning)
-        # else:
-        #     if not params.flags.writeable:
-        #         params = params.copy()
-        #     self._update_params(params)
+    def update_params(self, params: np.ndarray):
+        if self.is_frozen:
+            raise RuntimeError("Can not update params of frozen signal")
+        self._update_params(params)
 
     @abstractmethod
-    def _update_params(self, params: np.ndarray) -> None:
-        raise NotImplementedError
+    def _update_params(self, params: np.ndarray):
+        pass
 
 
 class Model(Signal, ABC):
-
-    def __init__(self, shape: tuple, **kwargs):
-        super().__init__(shape, **kwargs)
+    """Signals that can be fitted."""
 
     @abstractmethod
-    def fit(self, *args, **kwargs) -> ModelFit:
-        raise NotImplementedError
+    def fit(self, series: np.ndarray) -> ModelFit:
+        pass
 
     @abstractmethod
-    def forecast(self, *args, **kwargs):
-        raise NotImplementedError
+    def forecast(self, steps: int) -> np.ndarray:
+        pass
 
 
-class CompositeSignal(Signal, ABC):
+SignalTupleT = TypeVar(
+    "SignalTupleT",
+    bound=Tuple["Signal", ...]
+)
 
-    def __init__(self, shape, **kwargs):
-        super().__init__(shape, **kwargs)
+class CompositeMixin(Generic[SignalTupleT]):
+    """Mixin for signals/models with multiple underlying signals."""
+
+    def __init__(self, underlying_signals: SignalTupleT):
+        self._underlying_signals: SignalTupleT = underlying_signals
 
     @property
     def is_frozen(self):
-        comps = getattr(self, "_underlying_signals", None)
-        if comps is None:
-            # During initialization, consider the object unfrozen
-            return False
-        # return all(comp.is_frozen for comp in comps)
-        return len(self._underlying_unfrozen_signals) == 0
+        """Returns True if all underlying signals are frozen, otherwise False."""
+        return all(s.is_frozen for s in self._underlying_signals)
 
     def freeze(self):
-        for signal in self._underlying_unfrozen_signals:
+        """Freeze all underlying signals."""
+        for signal in self._underlying_signals:
             signal.freeze()
 
     def unfreeze(self):
+        """Unfreeze all underlying signals."""
         for signal in self._underlying_signals:
             signal.unfreeze()
 
     @property
-    @abstractmethod
-    def _underlying_signals(self) -> list[Signal]:
-        raise NotImplementedError
-
-    @property
-    def _underlying_unfrozen_signals(self) -> list[Signal]:
-        return [i for i in self._underlying_signals if not i.is_frozen]
-
-    def _update_params(self, params: np.ndarray) -> None:
-        idx_shift = 0
-        for signal in self._underlying_unfrozen_signals:
-            signal.update_params(params[idx_shift:idx_shift + signal.n_params])
-            idx_shift += signal.n_params
-
-    def _get_params(self) -> np.ndarray:
-        params = np.empty((self.n_params,))
-
-        idx_shift = 0
-        for signal in self._underlying_unfrozen_signals:
-            params[idx_shift:idx_shift + signal.n_params] = signal.get_params()
-            idx_shift += signal.n_params
-        return params
-
-    @property
     def is_defined(self):
-        return all(obj.is_defined for obj in self._underlying_signals)
+        """Returns True if all underlying signals are defined."""
+        return all(s.is_defined for s in self._underlying_signals)
 
-    @cached_property
+    @property
+    def _underlying_unfrozen_signals(self):
+        """Returns a list of unfrozen signals."""
+        return [s for s in self._underlying_signals if not s.is_frozen]
+
+    @property
+    def n_tot_params(self) -> int:
+        return sum(s.n_tot_params for s in self._underlying_signals)
+
+    @property
     def _n_params(self):
-        n_params = 0
-        for obj in self._underlying_unfrozen_signals:
-            n_params += obj.n_params
-        return n_params
+        """Returns the sum of the n_params from all unfrozen signals."""
+        return sum(s.n_params for s in self._underlying_signals)
 
+    def _get_params(self):
+        """Concatenates and returns the parameters from all unfrozen signals."""
+        return np.concatenate([s.get_params() for s in self._underlying_unfrozen_signals])
 
-class CompositeModel(CompositeSignal, Model, ABC):
-    pass
-
+    def _update_params(self, params: np.ndarray):
+        """Updates parameters for each unfrozen signal."""
+        idx = 0
+        for signal in self._underlying_unfrozen_signals:
+            signal.update_params(params[idx:idx + signal.n_params])
+            idx += signal.n_params
