@@ -43,27 +43,3 @@ def covariance_to_correlation(cov_matrix: np.ndarray) -> np.ndarray:
 
     return corr_matrix
 
-class NaturalMeta(type):
-    def __instancecheck__(cls, instance):
-        return isinstance(instance, int) and instance >= 0
-
-class Natural(metaclass=NaturalMeta):
-    """A type representing natural numbers (0, 1, 2, ...) for isinstance checks."""
-    pass
-
-class PositiveNaturalMeta(type):
-    def __instancecheck__(cls, instance):
-        return isinstance(instance, int) and instance > 0
-
-class PositiveNatural(metaclass=PositiveNaturalMeta):
-    """A type representing positive natural numbers (1, 2, 3, ...) for isinstance checks."""
-    pass
-
-class PositiveMeta(type):
-    def __instancecheck__(cls, instance):
-        return isinstance(instance, int) and instance > 0
-
-class Positive(metaclass=PositiveMeta):
-    """A type representing positive integers (1, 2, 3, ...) for isinstance checks."""
-    pass
-
