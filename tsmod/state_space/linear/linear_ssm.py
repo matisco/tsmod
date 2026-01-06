@@ -103,20 +103,21 @@ class LinearSSMUtils:
 
         # ---- Latent Process Representation and Simulation ----
         state_dim = latent_process.state_dim
+        innovation_dim = latent_process.innovation_dim
 
         rep = latent_process.representation()
         M, F, RLQ = rep.M, rep.F, rep.R @ rep.LQ
 
         if initial_state is not None:
             latent_stochastic = np.zeros((T, state_dim))
-            eta = np.random.randn(T, state_dim)
+            eta = np.random.randn(T, innovation_dim)
             latent_stochastic[0] = F @ initial_state + RLQ @ eta[0]
             for t in range(1, T):
                 latent_stochastic[t] = F @ latent_stochastic[t - 1] + RLQ @ eta[t]
             latent_stochastic = latent_stochastic @ M.T
         else:
             latent_stochastic = np.zeros((T + burn, state_dim))
-            eta = np.random.randn(T + burn, state_dim)
+            eta = np.random.randn(T + burn, innovation_dim)
             latent_stochastic[0] = eta[0]
             for t in range(1, T + burn):
                 latent_stochastic[t] = F @ latent_stochastic[t-1] + RLQ @ eta[t]
