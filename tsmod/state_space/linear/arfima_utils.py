@@ -3,6 +3,7 @@ from scipy.signal import lfilter
 from scipy.optimize import minimize, minimize_scalar
 from scipy.fft import fft, ifft, next_fast_len
 from scipy.linalg import block_diag
+from scipy.special import gammaln
 
 from typing import Tuple, Optional
 
@@ -259,6 +260,80 @@ def fractional_integrated_errors_to_ma_poly(d, N):
     return b
 
 
+def tempered_fractional_integrated_errors_to_ma_poly(d, lam, N):
+    """
+    MA coefficients for (1 - exp(-lam) L)^(-d)
+
+    Parameters
+    ----------
+    d : float
+        fractional integration parameter (d > 0)
+    lam : float
+        tempering parameter (lam >= 0)
+    N : int
+        number of MA coefficients (including lag 0)
+
+    Returns
+    -------
+    b : ndarray, shape (N,)
+        truncated MA coefficients
+    """
+    k = np.arange(1, N)
+    frac = np.cumprod((k + d - 1) / k)
+    b = np.empty(N)
+    b[0] = 1.0
+    b[1:] = frac * np.exp(-lam * k)
+    return b
+
+
+def tempered_fractional_integrated_errors_to_ma_poly_safe(d, lam, N):
+    k = np.arange(N)
+    log_b = (
+        gammaln(k + d)
+        - gammaln(d)
+        - gammaln(k + 1)
+        - lam * k
+    )
+    return np.exp(log_b)
+
+
+def tempered_fractional_integrated_errors_to_ar_poly(d, lam, N):
+    """
+    AR coefficients for (1 - exp(-lam) L)^d
+
+    Parameters
+    ----------
+    d : float
+        fractional differencing parameter
+    lam : float
+        tempering parameter (lam >= 0)
+    N : int
+        number of AR coefficients (including lag 0)
+
+    Returns
+    -------
+    b : ndarray, shape (N,)
+        truncated AR coefficients
+    """
+    k = np.arange(1, N)
+    frac = np.cumprod((k - d - 1) / k)
+    b = np.empty(N)
+    b[0] = 1.0
+    b[1:] = frac * np.exp(-lam * k)
+    return b
+
+
+def tempered_fractional_integrated_errors_to_ar_poly_safe(d, lam, N):
+    k = np.arange(N)
+    log_b = (
+        gammaln(k - d)
+        - gammaln(-d)
+        - gammaln(k + 1)
+        - lam * k
+    )
+    return np.exp(log_b)
+
+
 def arma_poly_to_ma_representation(ar_poly, ma_poly, n):
     impulse = np.zeros(n)
     impulse[0] = 1.0
@@ -496,6 +571,36 @@ class ARIMAFitFromMA:
 
         self._order = order
 
+    def _params_to_coeffs(self, params):
+        p, k, q = self.order
+        if self._enforce_stability:
+            phis = transformed_pacfs_to_coeffs(params[:p]) if p > 0 else np.array([])
+        else:
+            phis = params[:p] if p > 0 else np.array([])
+        if self._enforce_invertibility:
+            thetas = - transformed_pacfs_to_coeffs(params[p:]) if q > 0 else np.array([])
+        else:
+            thetas = params[p:] if q > 0 else np.array([])
+        return phis, thetas
+
+    def _random_params(self):
+
+        def random_transformed_pacfs(n):
+            pacfs = np.random.uniform(-0.95, 0.95, n)
+            return np.arctanh(pacfs)  # convert to unconstrained
+
+        p, k, q = self.order
+        if self._enforce_stability:
+            phis_params = random_transformed_pacfs(p) if p > 0 else np.array([])
+        else:
+            phis_params = 5 * np.random.rand(p) - 2.5 if p > 0 else np.array([])
+        if self._enforce_invertibility:
+            theta_params = random_transformed_pacfs(q) if q > 0 else np.array([])
+        else:
+            theta_params = 5 * np.random.rand(q) - 2.5 if q > 0 else np.array([])
+
+        return phis_params, theta_params
+
     def calc_coeffs(self,
                     ma_representation: np.ndarray,
                     initial_phis: Optional[np.ndarray] = None,
@@ -515,28 +620,32 @@ class ARIMAFitFromMA:
         if initial_thetas is not None and len(initial_thetas) != q:
             raise ValueError("initial_thetas must have length q.")
 
-        # --- Helper: random PACFs ------------------------------------------------
-        def random_transformed_pacfs(n):
-            pacfs = 2 * np.random.rand(n) - 1  # uniform in (-1,1)
-            return np.arctanh(pacfs)  # convert to unconstrained
 
         # --- Build initial guess -------------------------------------------------
         params0 = np.zeros(p + q)
 
+        random_phi_params, random_theta_params = self._random_params()
         if initial_phis is not None:
-            params0[:p] = coeffs_to_transformed_pacfs(initial_phis)
+            if self._enforce_stability:
+                params0[:p] = coeffs_to_transformed_pacfs(initial_phis)
+            else:
+                params0[:p] = initial_phis
         else:
-            params0[:p] = random_transformed_pacfs(p)
+            params0[:p] = random_phi_params
 
         if initial_thetas is not None:
-            params0[p:] = coeffs_to_transformed_pacfs(initial_thetas)
+            if self._enforce_invertibility:
+                params0[p:] = coeffs_to_transformed_pacfs(- initial_thetas)
+            else:
+                params0[p:] = initial_thetas
         else:
-            params0[p:] = random_transformed_pacfs(q)
+            params0[p:] = random_theta_params
 
         # --- Objective function --------------------------------------------------
         def objective(x):
-            phis = transformed_pacfs_to_coeffs(x[:p]) if p > 0 else np.array([])
-            thetas = -transformed_pacfs_to_coeffs(x[p:]) if q > 0 else np.array([])
+            phis, thetas = self._params_to_coeffs(x)
+            if np.any(np.isnan(phis)) or np.any(np.isnan(thetas)):
+                return np.inf
 
             ma_rep = arma_coeffs_to_ma_representation(phis, thetas, T)
 
@@ -551,12 +660,18 @@ class ARIMAFitFromMA:
             return np.sum(diff ** 2)
 
         # --- Main optimization ---------------------------------------------------
+        run_multi_start = True
         if (initial_phis is not None) and (initial_thetas is not None):
             # One run only
-            best = minimize(objective, params0, method="L-BFGS-B")
-            best_x = best.x
+            result = minimize(objective, params0, method="L-BFGS-B")
+            if np.any(np.isnan(result.x)) or np.isnan(result.fun):
+                initial_phis = None
+                initial_thetas = None
+            else:
+                best_x = result.x
+                run_multi_start = False
 
-        else:
+        if run_multi_start:
             # Multi-start optimization
             best_f = np.inf
             best_x = None
@@ -565,15 +680,19 @@ class ARIMAFitFromMA:
             for _ in range(100):
                 # randomize missing parts only
                 trial = params0.copy()
+                random_phi_params, random_theta_params = self._random_params()
                 if initial_phis is None:
-                    trial[:p] = random_transformed_pacfs(p)
+                    trial[:p] = random_phi_params
                 if initial_thetas is None:
-                    trial[p:] = random_transformed_pacfs(q)
+                    trial[p:] = random_theta_params
 
                 result = minimize(objective, trial, method="L-BFGS-B")
+                if np.any(np.isnan(result.x)) or np.isnan(result.fun):
+                    continue
+
                 fval = result.fun
 
-                if abs(fval - best_f) / (best_f + 1e-12) < 0.01:
+                if abs(fval - best_f) / (best_f + 1e-8) < 0.01:
                     stagnation += 1
                 else:
                     stagnation = 0
@@ -586,10 +705,8 @@ class ARIMAFitFromMA:
                     break
 
         # --- Final parameters -----------------------------------------------------
-        phis = transformed_pacfs_to_coeffs(best_x[:p]) if p > 0 else np.array([])
-        thetas = -transformed_pacfs_to_coeffs(best_x[p:]) if q > 0 else np.array([])
+        phis, thetas = self._params_to_coeffs(best_x)
         return phis, thetas
-
 
 
 
@@ -597,33 +714,52 @@ if __name__ == '__main__':
 
     import time
 
-    p = 4
-    q = 3
-    k = 0
+    start = time.time()
+    ma_rep = tempered_fractional_integrated_errors_to_ma_poly_safe(1.4, 0.2, 10000)
+    end_time = time.time()
+    print(end_time - start)
 
-    N = 1000
+    start = time.time()
+    ma_rep2 = tempered_fractional_integrated_errors_to_ma_poly(1.4, 0.2, 10000)
+    end_time = time.time()
+    print(end_time - start)
 
-    np.random.seed(0)
-    pacfs_AR = np.random.rand(p) * 1.9 - 1
-    pacfs_MA = np.random.rand(q) * 1.9 - 1
+    print(ma_rep)
+    print(ma_rep2)
 
-    if p > 0:
-        phis = pacf_to_coeffs(pacfs_AR)
-    else:
-        phis = np.array([])
+    ma_rep = tempered_fractional_integrated_errors_to_ma_poly_safe(0.4, 0, 10)
+    ma_rep2 = fractional_integrated_errors_to_ma_poly(0.4, 10)
 
-    if q > 0:
-        thetas = - pacf_to_coeffs(pacfs_MA)
-    else:
-        thetas = np.array([])
+    print(ma_rep)
+    print(ma_rep2)
 
-    approx_calc = ARIMAFitFromMA(order=(p, k, q), time_weighting=False)
-    ma_representation_true = arma_coeffs_to_ma_representation(phis, thetas, N)
-    # ma_representation_true = fractional_integrated_errors_MAcoefficients(0.7, N)
-
-    aprox_phi, aprox_thetas = approx_calc.calc_coeffs(ma_representation_true)
-    print(phis)
-    print(aprox_phi)
-    print(thetas)
-    print(aprox_thetas)
+    # p = 4
+    # q = 3
+    # k = 0
+    #
+    # N = 1000
+    #
+    # np.random.seed(0)
+    # pacfs_AR = np.random.rand(p) * 1.9 - 1
+    # pacfs_MA = np.random.rand(q) * 1.9 - 1
+    #
+    # if p > 0:
+    #     phis = pacf_to_coeffs(pacfs_AR)
+    # else:
+    #     phis = np.array([])
+    #
+    # if q > 0:
+    #     thetas = - pacf_to_coeffs(pacfs_MA)
+    # else:
+    #     thetas = np.array([])
+    #
+    # approx_calc = ARIMAFitFromMA(order=(p, k, q), time_weighting=False)
+    # ma_representation_true = arma_coeffs_to_ma_representation(phis, thetas, N)
+    # # ma_representation_true = fractional_integrated_errors_MAcoefficients(0.7, N)
+    #
+    # aprox_phi, aprox_thetas = approx_calc.calc_coeffs(ma_representation_true)
+    # print(phis)
+    # print(aprox_phi)
+    # print(thetas)
+    # print(aprox_thetas)
 

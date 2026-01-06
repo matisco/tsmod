@@ -6,6 +6,7 @@ from scipy.signal import lfilter
 from scipy.optimize import minimize
 
 import tsmod.state_space.linear.arima
+from state_space.linear.arfima_utils import tempered_fractional_integrated_errors_to_ar_poly
 from tsmod.state_space.linear.linear_ssm import (AtomicLinearStateProcess, LinearStateProcessDynamics)
 
 from arfima_utils import (transformed_pacfs_to_coeffs,
@@ -20,6 +21,8 @@ from arfima_utils import (transformed_pacfs_to_coeffs,
                           )
 from arfima_utils import estimate_fractional_d_ewl, frac_diff
 from fi2arima import FracIEARIMAApproximator
+from arfima_utils import tempered_fractional_integrated_errors_to_ma_poly
+
 
 from tsmod.tools.utils import PositiveNatural
 from tsmod.utils import softplus
@@ -38,11 +41,12 @@ class NARIMA(AtomicLinearStateProcess, ABC):
         _immutable_options = tuple()
 
         def __init__(
-            self,
-            correlation_parameterization="hyperspherical",
-            representation="harvey",
+                self,
+                correlation_parameterization="hyperspherical",
+                representation="hamilton",
+                 **kwargs
         ):
-            super().__init__(**{k: v for k, v in locals().items() if k != "self" and k != "__class__"})
+            super().__init__(**{k: v for k, v in locals().items() if k != "self" and k != "__class__" and k != 'kwargs'}, **kwargs)
 
     def __init__(self,
                  order: Tuple[int, int, int],
@@ -377,7 +381,7 @@ class ExponentialQuadraticNARMA(NARIMA):
         ma_length_for_matching: int
 
         _valid_options = {
-            "first_estimation_method": PositiveNatural,
+            "ma_length_for_matching": (PositiveNatural,),
         }
 
         _immutable_options = tuple()
@@ -429,16 +433,18 @@ class ExponentialQuadraticNARMA(NARIMA):
 
         p, k, q = self.order
 
-        phis_, _ = fit_ar_ols(series[:, 0], p + q + 1)
-        T = series.shape[0]
-        ma_representation = arma_coeffs_to_ma_representation(phis_, [], self.advanced_options.ma_length_for_matching)
+        phis_, _ = fit_ar_ols(series[:, 0], p + k + q + 1)
+        ma_representation = arma_coeffs_to_ma_representation(phis_, [], self.advanced_options.ma_length_for_matching + 1)
 
         # --- Objective function --------------------------------------------------
         def objective(x):
-            self._dynamic_params = x
+            self._update_dynamic_params(x)
             ma_rep = self._calc_EQ_ma()
+            print(ma_rep)
             diff = ma_rep - ma_representation
-            return np.sum(diff ** 2)
+            weights = np.arange(self.advanced_options.ma_length_for_matching + 1, 0, -1)
+            return np.sum(weights * diff ** 2)
+            # return np.sum(diff ** 2)
 
         best_f = np.inf
         best_x = None
@@ -446,12 +452,12 @@ class ExponentialQuadraticNARMA(NARIMA):
 
         for _ in range(100):
             # randomize missing parts only
-            trial = np.random.rand(T) * 10 - 5
+            trial = np.random.rand(self.n_dynamic_params) * 10 - 5
 
             result = minimize(objective, trial, method="L-BFGS-B")
             fval = result.fun
 
-            if abs(fval - best_f) / (best_f + 1e-12) < 0.01:
+            if abs(fval - best_f) / (best_f + 1e-8) < 0.01:
                 stagnation += 1
             else:
                 stagnation = 0
@@ -463,7 +469,7 @@ class ExponentialQuadraticNARMA(NARIMA):
             if stagnation > 4:
                 break
 
-        self._dynamic_params = best_x
+        self._update_dynamic_params(best_x)
 
     @property
     def n_dynamic_params(self) -> int:
@@ -478,7 +484,10 @@ class ExponentialQuadraticNARMA(NARIMA):
 
     def _calc_ARIMA(self):
         ma_coeffs = self._calc_EQ_ma()
-        approx_calc = ARIMAFitFromMA(order=self.order, time_weighting=False)
+        approx_calc = ARIMAFitFromMA(order=self.order,
+                                     enforce_stability=False,
+                                     enforce_invertibility=False,
+                                     time_weighting=True)
         aprox_phi, aprox_thetas = approx_calc.calc_coeffs(ma_coeffs,
                                                           initial_phis=self.ar_coeffs,
                                                           initial_thetas=self.ma_coeffs)
@@ -493,30 +502,167 @@ class ExponentialQuadraticNARMA(NARIMA):
         return np.exp(-d * xs) * (1 + a * xs + b * xs ** 2)
 
 
+class ConstrainedEQNARMA(ExponentialQuadraticNARMA):
+
+    @property
+    def n_dynamic_params(self) -> int:
+        return 2
+
+    def _get_dynamic_params(self) -> np.ndarray:
+        return self._dynamic_params[:2]
+
+    def _update_dynamic_params(self, params: np.ndarray):
+        if self._dynamic_params is None:
+            self._dynamic_params = np.empty((3,))
+        self._dynamic_params[:2] = params
+        d, a = softplus(self._dynamic_params[0]), self._dynamic_params[1]
+        self._dynamic_params[2] = (- a + a * d + d)/(2 - d)
+        self._calc_ARIMA()
+
+
+class ApproximateTemperedFI(NARIMA):
+
+    class AdvancedOptions(NARIMA.AdvancedOptions):
+        pass
+
+    def __init__(self,
+                 approximate_arima_order: Tuple[int, int, int],
+                 fix_scale: bool = False,
+                 advanced_options: Optional[AdvancedOptions] = None, ):
+
+        advanced_options = advanced_options or self.AdvancedOptions()
+
+        super().__init__(order=approximate_arima_order,
+                         fix_scale=fix_scale,
+                         advanced_options=advanced_options)
+
+        self._d = None
+        self._T = None
+        self._decay = None
+
+    @property
+    def d(self):
+        return self._d
+
+    @d.setter
+    def d(self, d):
+        self._d = d
+        self._update_arima()
+
+    @property
+    def T(self):
+        return self._T
+
+    @T.setter
+    def T(self, value):
+        self._T = value
+        self._update_arima()
+
+    @property
+    def decay(self):
+        return self._decay
+
+    @decay.setter
+    def decay(self, value):
+        self._decay = value
+        self._update_arima()
+
+    def _update_arima(self):
+        if (self.d is not None) and (self.T is not None) and (self.decay is not None):
+            ma_coeffs = tempered_fractional_integrated_errors_to_ma_poly(self.d, self.decay, self.T)
+            approx_calc = ARIMAFitFromMA(order=self.order,
+                                         enforce_stability=True,
+                                         enforce_invertibility=True,
+                                         time_weighting=True)
+            aprox_phi, aprox_thetas = approx_calc.calc_coeffs(ma_coeffs,
+                                                              initial_phis=self.ar_coeffs,
+                                                              initial_thetas=self.ma_coeffs)
+
+            # print(aprox_phi)
+            # print(tempered_fractional_integrated_errors_to_ar_poly(self.d, self.decay, self.order[0]))
+
+            self._ar_coeffs = aprox_phi
+            self._ma_coeffs = aprox_thetas
+
+    def _first_fit_to(self, series: np.ndarray):
+        self.T = series.shape[0]
+        self.d = estimate_fractional_d_ewl(series[:, 0])
+        self.decay = 0
+
+        innovs = frac_diff(series[:, 0], self.d)
+        self.cov = self._cov_to_constrained_cov(np.cov(innovs).reshape(1, 1), False)
+        self._update_arima()
+
+    @property
+    def n_dynamic_params(self) -> int:
+        return 2
+
+    def _get_dynamic_params(self) -> np.ndarray:
+        return np.array([self.d, self.decay])
+
+    def _update_dynamic_params(self, params: np.ndarray):
+        self._d = params[0]
+        self._decay = params[1]
+        self._update_arima()
+
+
+
 if __name__ == "__main__":
 
     from matplotlib import pyplot as plt
     from scipy.signal import lfilter
     from arfima_utils import generate_arfima_from_coeffs
 
-    xs = np.arange(40)
+    xs = np.arange(1000)
 
-    d = np.random.rand(1) * 10 - 5
-    a = np.random.rand(1) * 10 - 5
-    b = np.random.rand(1) * 10 - 5
+    # d = np.random.rand(1) * 10 - 5
+    # d = softplus(d)
+    # a = np.random.rand(1) * 10 - 5
+    # # b = np.random.rand(1) * 10 - 5
+    # b = (- a + a * d + d)/(2 - d)
+    # ma_rep = np.exp(-d * xs) * (1 + a * xs + b * xs ** 2)
 
-    d = softplus(d)
-    ma_rep = np.exp(-d * xs) * (1 + a * xs + b * xs ** 2)
+    d = 0.8
+    lam = 0.01
+    ma_rep = tempered_fractional_integrated_errors_to_ma_poly(d, lam, 1001)
 
     p = 0
     k = 0
-    q = 3
+    q = 1000
     arima = tsmod.state_space.linear.arima.ARIMA(order=(p, k, q), fix_scale=False, enforce_stability=False, enforce_invertibility=False)
     arima.ma_poly = ma_rep[:q+1]
     arima.cov = np.array([[1]])
 
-    series = arima.simulate(k=1000, burn=1000)
+    T = 1500
 
+    series = arima.simulate(k=T, burn=1000)
     plt.plot(series[:, 0])
     plt.show()
+
+    model = ApproximateTemperedFI(approximate_arima_order=(3, 1, 3), fix_scale=True)
+    res = model.fit(series)
+
+    print(model.d)
+    print(model.decay)
+    print(model.T)
+
+    print(model.ar_coeffs)
+    print(model.ma_coeffs)
+
+    approximator = FracIEARIMAApproximator((3, 1, 3))
+    approximator.set_T(T)
+    phis, thetas = approximator.get_arma_coeffs(d)
+    print(phis)
+    print(thetas)
+
+
+    # eq_narma = ConstrainedEQNARMA((0, 0, 4), fix_scale=True)
+    # eq_narma.advanced_options.ma_length_for_matching = 5
+    #
+    # eq_narma._first_fit_to(series)
+    #
+    # print(ma_rep)
+    # print(eq_narma.ma_poly)
+    # print((d, a, b))
+    # print((softplus(eq_narma._dynamic_params[0]), eq_narma._dynamic_params[1:]))
 

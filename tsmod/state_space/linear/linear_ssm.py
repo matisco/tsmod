@@ -1,6 +1,6 @@
 # from dataclasses import dataclass
 from abc import ABC, abstractmethod
-from typing import Optional, Union, Any, Literal, Generic, TypeVar, Tuple
+from typing import Optional, Union, Any, Literal, Generic, TypeVar, Tuple, overload, Self
 # from typing import List, Sequence
 from functools import cached_property  # wraps
 # from enum import Enum, auto
@@ -379,7 +379,7 @@ class LinearStateProcess(Model, ABC):
         can be overwritten by subclasses.
         But my idea is to make a KalmanFilterInitializer class and pass that has an advanced option
         """
-        ssm.set_kf_initialization(initialization_type='ss',
+        ssm.set_kf_initialization(initialization='ss',
                                   init_state=np.zeros((self.state_dim, )))
 
     @check_is_defined
@@ -885,18 +885,41 @@ class LinearStateSpaceModel(CompositeMixin, Model):
                                                    measurement_noise_std=self.measurement_noise_std,
                                                    burn=burn)
 
-    def set_kf_initialization(self,
-                              initialization_type: Literal["ss", "ed", "s"],
-                              init_state: np.ndarray,
-                              P0: Optional[np.ndarray] = None,
-                              P_star: Optional[np.ndarray] = None,
-                              P_infty: Optional[np.ndarray] = None,):
+    @overload
+    def set_kf_initialization(
+            self,
+            initialization_type: Literal["ss", "ed", "s"],
+            init_state: np.ndarray,
+            P0: Optional[np.ndarray] = ...,  # can i have these dots here?
+            P_star: Optional[np.ndarray] = ...,
+            P_infty: Optional[np.ndarray] = ...,
+    ) -> "Self":
+        ...
 
-        self._kf_innit = KalmanFilterInitialization(initialization_type=initialization_type,
-                                                    x0=init_state,
-                                                    P0=P0,
-                                                    P_star=P_star,
-                                                    P_infty=P_infty)
+    @overload
+    def set_kf_initialization(
+            self,
+            initialization: KalmanFilterInitialization,
+    ) -> "Self":
+        ...
+
+    def set_kf_initialization(self, initialization, init_state=None, P0=None, P_star=None, P_infty=None):
+        if isinstance(initialization, KalmanFilterInitialization):
+            self._kf_innit = initialization
+        else:
+            if init_state is None:
+                raise TypeError(
+                    "init_state must be provided when initialization is a string"
+                )
+
+            self._kf_innit = KalmanFilterInitialization(
+                initialization_type=initialization,
+                x0=init_state,
+                P0=P0,
+                P_star=P_star,
+                P_infty=P_infty,
+            )
+        return self
 
     def fit(self,
             series: np.ndarray,
