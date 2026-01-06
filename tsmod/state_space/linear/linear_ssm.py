@@ -1,8 +1,9 @@
-from dataclasses import dataclass
+# from dataclasses import dataclass
 from abc import ABC, abstractmethod
-from typing import Optional, Union, Any, Literal, List, Generic, TypeVar, Sequence, Tuple
+from typing import Optional, Union, Any, Literal, Generic, TypeVar, Tuple
+# from typing import List, Sequence
 from functools import cached_property  # wraps
-from enum import Enum, auto
+# from enum import Enum, auto
 
 import numpy as np
 from scipy.linalg import block_diag, solve_triangular
@@ -14,16 +15,15 @@ from constrained_matrices import (ConstrainedMatrix,
                                   FreeMatrix,
                                   IdentityMatrix,
                                   ZeroMatrix,
-                                  ElementWiseConstrainedMatrix,
                                   ConstrainedCovarianceAPI)
+                                  # ElementWiseConstrainedMatrix
 
-
-from base import Signal, Model, ModelFit, CompositeMixin, check_is_defined
+from base import Model, ModelFit, CompositeMixin, check_is_defined
 from base import ForecastResult, DeterministicForecastResult, NormalForecastResult
-from tools.utils import validate_covariance, validate_chol_factor, covariance_to_correlation
+from tools.utils import validate_covariance, covariance_to_correlation # validate_chol_factor
 from state_space.tools.kalman_filter import (KalmanFilter,
-                                             KalmanFilterResult,
                                              KalmanFilterInitialization)
+                                             # KalmanFilterResult,
 
 from representation import LinearStateSpaceModelRepresentation, LinearStateProcessRepresentation, LinearStateProcessDynamics
 
@@ -35,9 +35,8 @@ from utils import numerical_jacobian
 
 # TODO: MEDIUM PRIORITY
 #       1. Add adaptive step to EM optimization (should take very little effort)
-#       2. the representation structure does nothing now. so the design is not super clear.
+#       2. Add RepresentationStructure and "better EM" which uses it
 #       3. Add Gauge Symmetries. Not using right now so I will skip for simplicity
-#
 
 # TODO: LOW PRIORITY
 #           1. Jacobian (score) and Hessian approximations are missing and should speed up minimization
@@ -140,7 +139,6 @@ class LinearSSMUtils:
 # Model Fit Class
 # ---------
 
-
 class LinearStateSpaceModelFit(ModelFit):
 
     def __init__(self,
@@ -172,11 +170,11 @@ class LinearStateSpaceModelFit(ModelFit):
         if loss.requires_cov:
             if isinstance(loss, GaussianNLL):
                 return self.nll()
-            raise NotImplementedError("Thus far, losses that require cov are not implemented")
+            raise NotImplementedError("Losses that require cov are not implemented")
         else:
             return loss(self.get_prediction_errors())
 
-# ---------
+# ----------------------------------------------------------------------------------------------------
 # LinearStateProcess
 #
 # A LinearStateProcess represents any process f_t with a state-space representation of the form
@@ -184,10 +182,7 @@ class LinearStateSpaceModelFit(ModelFit):
 #     f_t = M x_t
 #     x_t = F x_{t-1} + R u_t, u_t ~ N(0, Q) = LQ N(0, I)
 #
-#
-# ---------
-
-
+# ----------------------------------------------------------------------------------------------------
 class LinearStateProcess(Model, ABC):
     # TODO: put advanced options here and add kalman filter initializer
 
@@ -375,13 +370,16 @@ class LinearStateProcess(Model, ABC):
     def _first_fit_to_factor_model(self,
                                    series: np.ndarray,
                                    include_constant: bool,
-                                   measurement_noise: Literal["zero", "diagonal", "free"]) -> "LinearStateSpaceModel":
+                                   measurement_noise: Literal["zero", "diagonal", "free"]):
         raise NotImplementedError
 
-    def _initialize_ssm_kf(self, ssm: "LinearStateSpaceModel"):  # TODO: adding the options
+    def _initialize_ssm_kf(self, ssm: "LinearStateSpaceModel"):
+        """
+        can be overwritten by subclasses.
+        But my idea is to make a KalmanFilterInitializer class and pass that has an advanced option
+        """
         ssm.set_kf_initialization(initialization_type='ss',
                                   init_state=np.zeros((self.state_dim, )))
-
 
     @check_is_defined
     def forecast(self, k: int, initial_state: np.ndarray) -> np.ndarray:
@@ -675,8 +673,13 @@ class CompositeLinearStateProcess(CompositeMixin[TProcesses], LinearStateProcess
             raise ValueError("Mixing matrix must be an 2D np.ndarray.")
 
         for row in self.mixing_matrix:
-            idxs = row == 0
-            shapes = [self.underlying_processes[i].shape[0] for i in idxs]
+            # idxs = row == 0
+            # shapes = [self.underlying_processes[i].shape[0] for i in idxs]
+            shapes = [
+                self.underlying_processes[i].shape[0]
+                for i, val in enumerate(row)
+                if val == 0
+            ]
             if len(set(shapes)) != 1:
                 raise ValueError("Shape missmatch. Can not sum processes of different sizes.")
 
@@ -767,12 +770,12 @@ class LinearStateSpaceModel(CompositeMixin, Model):
 
         if not measurement_noise_constrain.lower() in self._measurement_noise_constraint_options:
             raise ValueError(f"Invalid measurement_noise_constrain: {measurement_noise_constrain}")
-        self._measurement_noise_constrain = measurement_noise_constrain.lower()
+        self._measurement_noise_constrain = measurement_noise_constrain
         self._measurement_noise_signal = ConstrainedCovarianceAPI(shape=(None, None),
                                                                   constrain=self._measurement_noise_constrain)
 
 
-        CompositeMixin.__init__(self, [linear_state_process, exposures, constant, self._measurement_noise_signal])
+        CompositeMixin.__init__(self, (linear_state_process, exposures, constant, self._measurement_noise_signal))
         Model.__init__(self, (None, 1),)
 
         self._check_shapes()

@@ -42,7 +42,7 @@ class ARIMA(AtomicLinearStateProcess):
             super().__init__(**{k: v for k, v in locals().items() if k != "self" and k != "__class__"})
 
     def __init__(self,
-                 order = Tuple[int, int, int],
+                 order: Tuple[int, int, int],
                  enforce_stability: bool  = True,
                  enforce_invertibility: bool = True,
                  fix_scale: bool = False,
@@ -222,7 +222,7 @@ class ARIMA(AtomicLinearStateProcess):
             self._ma_coeffs = - transformed_pacfs_to_coeffs(values)
 
         else:
-            self._ma_coeffs = values
+            self.ma_coeffs = values
 
     def _get_dynamic_params(self) -> np.ndarray:
         params = np.empty((self.n_dynamic_params,))
@@ -269,7 +269,7 @@ class ARIMA(AtomicLinearStateProcess):
         return LinearStateProcessDynamics(M=M, F=F, R=R)
 
     def _first_fit_to(self, series: np.ndarray):
-
+        # TODO: this breaks if the estimated phis are not stable and enforce_stability is true
 
         def fit_ar_ols(y, p):
             """
@@ -378,6 +378,7 @@ if __name__ == "__main__":
 
         print(f"nll: {res.nll}. ar: {arima.ar_coeffs}. ma: {arima.ma_coeffs}, e: {res.model.exposures}, inov std: {arima.std}, error std: {res.model.measurement_noise_std}")
 
+        print(res._kf.filter_with_dynamax())
 
     # for _ in range(0):
     #     p = np.random.randint(0, 5)

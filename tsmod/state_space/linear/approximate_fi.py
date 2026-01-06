@@ -50,7 +50,10 @@ class ApproximateFI(AtomicLinearStateProcess):
         self._d = None
         self._T = None
         self._approximator = FracIEARIMAApproximator(approximate_arima_order)
-        self._underlying_arima = ARIMA(order=approximate_arima_order, fix_scale=True)
+        self._underlying_arima = ARIMA(order=approximate_arima_order,
+                                       enforce_stability=True,
+                                       enforce_invertibility=True,
+                                       fix_scale=True)
         self._underlying_arima.advanced_options.representation = self.advanced_options.representation
 
     @property
@@ -103,7 +106,7 @@ class ApproximateFI(AtomicLinearStateProcess):
 
     def _get_dynamic_params(self) -> np.ndarray:
         a, b = self._d_limits
-        params = np.array([np.atanh(2 * (self.d - a) / (b - a) - 1)])
+        params = np.array([np.arctanh(2 * (self.d - a) / (b - a) - 1)])
         return params
 
     def _first_fit_to(self, series: np.ndarray):
@@ -123,7 +126,6 @@ class ApproximateFI(AtomicLinearStateProcess):
 
 if __name__ == "__main__":
 
-    from matplotlib import pyplot as plt
     # from scipy.signal import lfilter
     from tsmod.state_space.tools.kalman_filter import KalmanFilter, KalmanFilterInitialization
     # from arfima_utils import generate_arfima_from_polys

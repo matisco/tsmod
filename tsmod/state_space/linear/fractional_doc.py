@@ -1,23 +1,23 @@
+from typing import Tuple, Literal
+
 import numpy as np
 
 # from base import ModelFit, Signal
 from linear_ssm import CompositeLinearStateProcess
-from constrained_matrices import FreeMatrix as FreeMatrix
-
+# from constrained_matrices import FreeMatrix
 from approximate_fi import ApproximateFI
-from arfima_utils import estimate_fractional_d_ewl
+# from arfima_utils import estimate_fractional_d_ewl
 
-class FractionalComponents(CompositeLinearStateProcess):
+# TODO: I wont use this model in the near future and i am lazy. should be quick todo. whatever bye
+
+class FractionalComponents(CompositeLinearStateProcess[Tuple[ApproximateFI, ...]]):
 
     def __init__(self, n_components):
 
-        processes = [ApproximateFI(approximate_arima_order=(3,1,3)) for _ in range(n_components)]
+        processes = tuple(ApproximateFI(approximate_arima_order=(3,1,3)) for _ in range(n_components))
         mixing_matrix = np.eye(n_components)
 
         super().__init__(processes, mixing_matrix)
-
-        self._n_components = n_components
-        self._exposures = FreeMatrix((None, self._n_components))
 
     def _first_fit_to(self, series: np.ndarray):
         X = series - series.mean(axis=0)
@@ -29,14 +29,13 @@ class FractionalComponents(CompositeLinearStateProcess):
         d = d[idx]
         V = V[:, idx]
 
-        factors = X @ V[:, :self._n_components]
+        factors = X @ V[:, :self.n_underlying_processes]
 
-        loadings = V[:, :self._n_components] * np.sqrt(d[:self._n_components])
+        loadings = V[:, :self.n_underlying_processes] * np.sqrt(d[:self.n_underlying_processes])
 
-
-
-
-
-
-
+    def _first_fit_to_factor_model(self,
+                                   series: np.ndarray,
+                                   include_constant: bool,
+                                   measurement_noise: Literal["zero", "diagonal", "free"]):
+        raise NotImplementedError()
 

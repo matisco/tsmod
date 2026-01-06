@@ -1,19 +1,26 @@
 import numpy as np
 # from mpmath.libmp.libmpf import negative_rnd
 # from numba.core.ir import Raise
-# from numpy.linalg import matrix_rank  # use to check stationarity
-
-from scipy.linalg import eigh, qr, cho_factor, cho_solve  # used for exact diffuse, kalman filter uses inv (questionable choice)
-from scipy.linalg import solve_discrete_are  # use to solve steady state P
-
 from functools import cached_property  # wraps
 from typing import Literal, Optional  # Iterable
 
+# from numpy.linalg import matrix_rank  # use to check stationarity
+from scipy.linalg import eigh, qr, cho_factor, cho_solve  # used for exact diffuse, kalman filter uses inv (questionable choice)
 from numba import njit
 
 from optimization_objectives import OptimizationObjective, GaussianNLL
-
 from state_space.linear.representation import MutableLinearStateSpaceModelRepresentation, LinearStateSpaceModelRepresentation
+
+# from dynamax.linear_gaussian_ssm.inference import (lgssm_filter,
+#                                                    PosteriorGSSMFiltered,
+#                                                    ParamsLGSSM,
+#                                                    ParamsLGSSMInitial,
+#                                                    ParamsLGSSMDynamics,
+#                                                    ParamsLGSSMEmissions,
+#                                                    )
+# from jaxtyping import Float
+# import jax
+# import jax.numpy as jnp
 
 # This kalman filter does not incorporate with the base.py defined for tsmod
 # It is instead seen as an estimation tool, a calculator if you will.
@@ -45,6 +52,8 @@ from state_space.linear.representation import MutableLinearStateSpaceModelRepres
 #       2. I don't like statsmodels framework. I will work on implementing my own and use dynamax for KF
 #               https://probml.github.io/dynamax/index.html
 #       3. Dynamax does not have steady state or diffuse initialization. my own everything it is
+
+# TODO: Square root filtering i want
 
 
 @njit  # this should be the main work horse here
@@ -1247,6 +1256,57 @@ class KalmanFilter:
                                  pred_errors, x_predicted, P_predicted, nll, ZTSinv)
 
         return res
+
+    # def filter_with_dynamax(self):
+    #     self._check_properly_defined()
+    #
+    #     endog = self.endog
+    #     rep = self.representation
+    #     const, Z, H, F, RQRT = rep.const, rep.E @ rep.M, rep.H, rep.F, rep.RQRT
+    #
+    #     x0 = self.initialization.x0
+    #
+    #     if self.initialization.type == "ss":
+    #         P0 = self.representation.steady_state_covariance
+    #     elif self.initialization.type == "s":
+    #         P0 = self.initialization.P0
+    #     elif self.initialization.type == "ed":
+    #         P0 = self.initialization.P_star + 1e8 * self.initialization.P_infty
+    #     else:
+    #         raise ValueError("Error initializing kalman filter. Check inputs")
+    #
+    #     state_dim = F.shape[0]
+    #     emission_dim = Z.shape[0]
+    #
+    #     _initial_mean = jax.device_put(x0),
+    #     _initial_covariance = jax.device_put(P0)
+    #     _dynamics_weights = jax.device_put(F)
+    #     _dynamics_input_weights = jnp.zeros((state_dim, 1))
+    #     _dynamics_bias = jnp.zeros((state_dim,))
+    #     _dynamics_covariance = jax.device_put(RQRT)
+    #     _emission_weights = jax.device_put(Z)
+    #     _emission_input_weights = jnp.zeros((emission_dim, 1))
+    #     _emission_bias = jax.device_put(const)
+    #     _emission_covariance = jax.device_put(H)
+    #
+    #
+    #     params = ParamsLGSSM(
+    #         initial=ParamsLGSSMInitial(
+    #             mean=_initial_mean,
+    #             cov=_initial_covariance),
+    #         dynamics=ParamsLGSSMDynamics(
+    #             weights=_dynamics_weights,
+    #             bias=_dynamics_bias,
+    #             input_weights=_dynamics_input_weights,
+    #             cov= _dynamics_covariance),
+    #         emissions=ParamsLGSSMEmissions(
+    #             weights=_emission_weights,
+    #             bias=_emission_bias,
+    #             input_weights=_emission_input_weights,
+    #             cov=_emission_covariance)
+    #     )
+    #
+    #     return lgssm_filter(params, jax.device_put(endog))
 
     def _calc_filtered(self):
 

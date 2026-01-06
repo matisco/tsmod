@@ -43,4 +43,3 @@ def covariance_to_correlation(cov_matrix: np.ndarray) -> np.ndarray:
 
     return corr_matrix
 
-
