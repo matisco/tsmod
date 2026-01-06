@@ -3,7 +3,9 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 from scipy.signal import lfilter
+from scipy.optimize import minimize
 
+import tsmod.state_space.linear.arima
 from tsmod.state_space.linear.linear_ssm import (AtomicLinearStateProcess, LinearStateProcessDynamics)
 
 from arfima_utils import (transformed_pacfs_to_coeffs,
@@ -18,6 +20,9 @@ from arfima_utils import (transformed_pacfs_to_coeffs,
                           )
 from arfima_utils import estimate_fractional_d_ewl, frac_diff
 from fi2arima import FracIEARIMAApproximator
+
+from tsmod.tools.utils import PositiveNatural
+from tsmod.utils import softplus
 
 
 class NARIMA(AtomicLinearStateProcess, ABC):
@@ -372,7 +377,7 @@ class ExponentialQuadraticNARMA(NARIMA):
         ma_length_for_matching: int
 
         _valid_options = {
-            "first_estimation_method": int,
+            "first_estimation_method": PositiveNatural,
         }
 
         _immutable_options = tuple()
@@ -397,7 +402,68 @@ class ExponentialQuadraticNARMA(NARIMA):
         self._dynamic_params = None
 
     def _first_fit_to(self, series: np.ndarray):
-        pass
+
+        def fit_ar_ols(y, p):
+            """
+            Fit AR(p) model to y using OLS:
+                y_t = phi_1 y_{t-1} + ... + phi_p y_{t-p} + e_t
+
+            Returns:
+                phi : (p,) AR coefficients
+                e   : residuals aligned with y[p:]
+            """
+            y = np.asarray(y)
+            T = y.shape[0]
+
+            # Build regression matrix
+            X = np.column_stack([y[p - k - 1:T - k - 1] for k in range(p)])  # lagged values
+            y_target = y[p:]
+
+            # OLS estimate
+            phi = np.linalg.lstsq(X, y_target, rcond=None)[0]
+
+            # Residuals
+            residuals = y_target - X @ phi
+
+            return phi, residuals
+
+        p, k, q = self.order
+
+        phis_, _ = fit_ar_ols(series[:, 0], p + q + 1)
+        T = series.shape[0]
+        ma_representation = arma_coeffs_to_ma_representation(phis_, [], self.advanced_options.ma_length_for_matching)
+
+        # --- Objective function --------------------------------------------------
+        def objective(x):
+            self._dynamic_params = x
+            ma_rep = self._calc_EQ_ma()
+            diff = ma_rep - ma_representation
+            return np.sum(diff ** 2)
+
+        best_f = np.inf
+        best_x = None
+        stagnation = 0
+
+        for _ in range(100):
+            # randomize missing parts only
+            trial = np.random.rand(T) * 10 - 5
+
+            result = minimize(objective, trial, method="L-BFGS-B")
+            fval = result.fun
+
+            if abs(fval - best_f) / (best_f + 1e-12) < 0.01:
+                stagnation += 1
+            else:
+                stagnation = 0
+
+            if fval < best_f:
+                best_f = fval
+                best_x = result.x
+
+            if stagnation > 4:
+                break
+
+        self._dynamic_params = best_x
 
     @property
     def n_dynamic_params(self) -> int:
@@ -408,11 +474,49 @@ class ExponentialQuadraticNARMA(NARIMA):
 
     def _update_dynamic_params(self, params: np.ndarray):
         self._dynamic_params = params
+        self._calc_ARIMA()
 
     def _calc_ARIMA(self):
-        ma_coeffs = np.exp(-self._dynamic_params[0] * x)4
+        ma_coeffs = self._calc_EQ_ma()
+        approx_calc = ARIMAFitFromMA(order=self.order, time_weighting=False)
+        aprox_phi, aprox_thetas = approx_calc.calc_coeffs(ma_coeffs,
+                                                          initial_phis=self.ar_coeffs,
+                                                          initial_thetas=self.ma_coeffs)
 
-    def _calc_EQ_ma(self):
+        self._ar_coeffs = aprox_phi
+        self._ma_coeffs = aprox_thetas
+
+    def _calc_EQ_ma(self) -> np.ndarray:
         xs = np.arange(self.advanced_options.ma_length_for_matching + 1)
-        np.exp(-self._dynamic_params[0] * x)
-        4
+        d = softplus(self._dynamic_params[0])
+        a, b = self._dynamic_params[1:]
+        return np.exp(-d * xs) * (1 + a * xs + b * xs ** 2)
+
+
+if __name__ == "__main__":
+
+    from matplotlib import pyplot as plt
+    from scipy.signal import lfilter
+    from arfima_utils import generate_arfima_from_coeffs
+
+    xs = np.arange(40)
+
+    d = np.random.rand(1) * 10 - 5
+    a = np.random.rand(1) * 10 - 5
+    b = np.random.rand(1) * 10 - 5
+
+    d = softplus(d)
+    ma_rep = np.exp(-d * xs) * (1 + a * xs + b * xs ** 2)
+
+    p = 0
+    k = 0
+    q = 3
+    arima = tsmod.state_space.linear.arima.ARIMA(order=(p, k, q), fix_scale=False, enforce_stability=False, enforce_invertibility=False)
+    arima.ma_poly = ma_rep[:q+1]
+    arima.cov = np.array([[1]])
+
+    series = arima.simulate(k=1000, burn=1000)
+
+    plt.plot(series[:, 0])
+    plt.show()
+
