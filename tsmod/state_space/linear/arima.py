@@ -2,7 +2,6 @@ from typing import Tuple, Literal
 import numpy as np
 from collections import defaultdict
 
-from state_space.tools.kalman_filter import KalmanFilterInitialization
 # from base import ModelFit
 # from build.lib.tsmod.optimization_objectives import GaussianNLL
 from tsmod.state_space.linear.linear_ssm import (AtomicLinearStateProcess, LinearStateProcessDynamics)

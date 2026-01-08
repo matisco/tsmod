@@ -21,8 +21,8 @@ from constrained_matrices import (ConstrainedMatrix,
 from base import Model, ModelFit, CompositeMixin, check_is_defined
 from base import ForecastResult, DeterministicForecastResult, NormalForecastResult
 from tools.utils import validate_covariance, covariance_to_correlation # validate_chol_factor
-from state_space.tools.kalman_filter import (KalmanFilter,
-                                             KalmanFilterInitialization)
+from state_space.ssmflux.kalman_filter import (KalmanFilter,
+                                               KalmanFilterInitialization)
                                              # KalmanFilterResult,
 
 from representation import LinearStateSpaceModelRepresentation, LinearStateProcessRepresentation, LinearStateProcessDynamics

@@ -127,7 +127,7 @@ class ApproximateFI(AtomicLinearStateProcess):
 if __name__ == "__main__":
 
     # from scipy.signal import lfilter
-    from tsmod.state_space.tools.kalman_filter import KalmanFilter, KalmanFilterInitialization
+    from tsmod.state_space.ssmflux.kalman_filter import KalmanFilter, KalmanFilterInitialization
     # from arfima_utils import generate_arfima_from_polys
     from arfima_utils import generate_arfima_from_coeffs
     import time

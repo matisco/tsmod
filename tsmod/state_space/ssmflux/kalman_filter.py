@@ -22,38 +22,9 @@ from state_space.linear.representation import MutableLinearStateSpaceModelRepres
 # import jax
 # import jax.numpy as jnp
 
-# This kalman filter does not incorporate with the base.py defined for tsmod
-# It is instead seen as an estimation tool, a calculator if you will.
-# The class StateSpaceModel uses the KalmanFilter for estimation, and incorporates with base.py
 
-
-# NOTE: The mere existence of this file is a bit silly because there are many kalman filter implementations
-#       Take statsmodels.tsa.statespace.kalman_filter.KalmanFilter for instance
-#       Nevertheless, the reasons for these classes is:
-#           1. I want to use a steady state kalman filter even when the state is non-stationary, cause who cares
-#           2. I want to use the Riccati equation to calculate the steady state cov WITH A WARM START
-#           3. Simpler (for me) to use without having to adopt statsmodels framework, which was not really made with
-#              the intent for someone else to use it
-#           4. Better incorporates with the methods I am defining for my models
-#           5. I expect this "simple" kalman filter to work for all my applications
-#
-#       Considering the application, I've tried to keep it short and simple.
-#       That is apparently not possible (easy) with a kalman filter, who knew
-
-
-# Note: A few options for the future
-#       1. I adopt statsmodels framework with
-#               statsmodels.tsa.statespace.kalman_filter.KalmanFilter
-#               statsmodels.tsa.statespace.representation
-#               statsmodels.tsa.statespace.initialization
-#               statsmodels.tsa.statespace.mlemodel.MLEModel
-#                      see tsmod.long_memory.unobserved_components.FractionalUnobservedComponents
-#                          statsmodels.tsa.statespace.structural.UnobservedComponents
-#       2. I don't like statsmodels framework. I will work on implementing my own and use dynamax for KF
-#               https://probml.github.io/dynamax/index.html
-#       3. Dynamax does not have steady state or diffuse initialization. my own everything it is
-
-# TODO: Square root filtering i want
+# TODO: 1. Square root filtering i want
+#       2. I clearly didnt know how to code when i did this. Forgive me. It works
 
 
 @njit  # this should be the main work horse here
